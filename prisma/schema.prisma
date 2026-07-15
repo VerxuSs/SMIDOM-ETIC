@@ -1,0 +1,111 @@
+// Schéma Prisma — Consolidation des données de collecte de déchets
+// Base : SQLite (fichier local, adapté au POC / petite structure)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// Référentiel véhicules (import "Immatriculations")
+model Vehicule {
+  immatriculation String @id
+  fonction        String
+
+  @@map("vehicules")
+}
+
+/// Pesées (imports "Sytraival" et "Serfim")
+model Pesee {
+  id              Int      @id @default(autoincrement())
+  date            DateTime
+  immatriculation String
+  produit         String
+  poidsNet        Float
+
+  @@index([date])
+  @@index([immatriculation])
+  @@map("pesees")
+}
+
+/// Suivi véhicule : kilométrage et carburant (imports "Kilomètres" et "Carburant")
+/// Les deux imports alimentent la même table mais sur des lignes distinctes :
+/// - "Kilomètres"  -> distanceKm renseigné,  litresCarburant = null
+/// - "Carburant"   -> litresCarburant renseigné, distanceKm = null
+model SuiviVehicule {
+  id              Int      @id @default(autoincrement())
+  date            DateTime
+  immatriculation String
+  distanceKm      Float?
+  litresCarburant Float?
+
+  @@index([date])
+  @@index([immatriculation])
+  @@map("suivi_vehicules")
+}
+
+/// Bio-déchets dépivotés (import "Bio-déchets Ecovalim")
+model BioDechet {
+  id       Int      @id @default(autoincrement())
+  date     DateTime
+  idBac    String
+  poidsKg  Float
+
+  @@index([date])
+  @@index([idBac])
+  @@map("bio_dechets")
+}
+
+/* ---------------------------------------------------------------------
+   Module Déchèteries
+--------------------------------------------------------------------- */
+
+/// Passages en déchèterie (import "Passages")
+model DechetteriePassage {
+  id          String   @id @default(cuid())
+  datePassage DateTime
+  site        String
+  typeUsager  String?
+
+  @@index([datePassage])
+  @@index([site])
+  @@map("dechetterie_passages")
+}
+
+/// Flux de déchèterie tous prestataires confondus (imports "Flux EGT",
+/// "D3E", "Piles", "Chimirec", "EcoDDS", "Eco'Sol")
+model DechetterieFlux {
+  id            String   @id @default(cuid())
+  dateCollecte  DateTime
+  site          String
+  categorieFlux String // Valeurs : "PAYANT" ou "REP"
+  prestataire   String
+  matiere       String
+  poidsTonnes   Float // Règle d'or : Toujours en tonnes !
+
+  @@index([dateCollecte])
+  @@index([site])
+  @@index([prestataire])
+  @@map("dechetterie_flux")
+}
+
+/* ---------------------------------------------------------------------
+   Module RI (Redevance Incitative)
+--------------------------------------------------------------------- */
+
+/// KPIs mensuels du module RI — une seule ligne par (mois, indicateur).
+/// Alimentée par agrégation à la volée : les fichiers sources (jusqu'à
+/// 30 000 lignes) ne sont jamais stockés tels quels, seuls les compteurs
+/// calculés en mémoire sont persistés.
+model RiIndicateur {
+  id            String @id @default(cuid())
+  moisReference String // Format "AAAA-MM" (envoyé par le front)
+  indicateur    String // Nom du KPI (ex: "ARRIVEES_CLIENTS")
+  valeur        Int
+
+  @@unique([moisReference, indicateur]) // Upsert : 1 seule valeur par KPI et par mois !
+  @@map("ri_indicateurs")
+}

@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  app-dechets:
+    build: .
+    container_name: poc-dechets-app
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=file:/app/prisma/dev.db
+    volumes:
+      - ./prisma:/app/prisma
+    restart: unless-stopped
+
+  prisma-studio:
+    build: .
+    container_name: poc-dechets-studio
+    ports:
+      - "5555:5555"
+    environment:
+      - DATABASE_URL=file:/app/prisma/dev.db
+    volumes:
+      - ./prisma:/app/prisma
+    # On force Prisma Studio à écouter sur toutes les interfaces réseau pour y accéder depuis notre PC
+    command: npx prisma studio --port 5555 --hostname 0.0.0.0
+    restart: unless-stopped
