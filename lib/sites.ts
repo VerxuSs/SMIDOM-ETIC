@@ -6,7 +6,7 @@
  * de ces libellés vers un nom canonique unique par site.
  */
 
-const TERRITOIRE_SITES: { canon: string; keywords: string[] }[] = [
+export const TERRITOIRE_SITES: { canon: string; keywords: string[] }[] = [
   { canon: "Saint-Jean-sur-Veyle", keywords: ["ST JEAN", "SAINT JEAN", "SAINT-JEAN"] },
   { canon: "Saint-Etienne-sur-Chalaronne", keywords: ["ST ETIENNE", "SAINT ETIENNE", "SAINT-ETIENNE"] },
   { canon: "Vonnas", keywords: ["VONNAS"] },

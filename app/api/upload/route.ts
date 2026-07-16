@@ -406,10 +406,20 @@ async function handleEgt(workbook: XLSX.WorkBook, targetMonth: unknown): Promise
  * Workflow "D3E"
  * --------------------------------------------------------------------- */
 const D3E_MATIERES: { matiere: string; col: number }[] = [
+  // --- Flux Ménagers classiques ---
   { matiere: "GEMF", col: 8 },
   { matiere: "GEMHF", col: 10 },
   { matiere: "PAM", col: 12 },
   { matiere: "ECRANS", col: 14 },
+
+  // --- Flux Professionnels (GEP) ---
+  { matiere: "GEP F", col: 18 },
+  { matiere: "GEP HF", col: 20 },
+
+  // --- Lampes, Tubes et Autres ---
+  { matiere: "Lampes et Mixtes", col: 24 },
+  { matiere: "Tubes", col: 26 },
+  { matiere: "Article Culinaire Usagé", col: 30 },
 ];
 
 async function handleD3E(workbook: XLSX.WorkBook, targetMonth: unknown): Promise<ImportResult> {
