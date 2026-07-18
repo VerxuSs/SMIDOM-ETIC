@@ -16,14 +16,13 @@ export async function GET(req: NextRequest) {
     windows = computeFourWindows(month);
   } catch (err) {
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Mois invalide." },
-      { status: 400 }
+        { error: err instanceof Error ? err.message : "Mois invalide." },
+        { status: 400 }
     );
   }
 
   try {
-    // Les 4 onglets sont indépendants : on les calcule en parallèle plutôt
-    // qu'en série pour limiter la latence totale de la requête.
+    // Les 4 onglets sont indépendants : on les calcule en parallèle
     const [omr, decheteries, ri, cs] = await Promise.all([
       getOmrTab(windows),
       getDecheteriesTab(windows),
@@ -33,8 +32,13 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      month,
-      label: windows.label,
+      // On renvoie la temporalité exacte au Front pour l'affichage des titres
+      temporalite: {
+        mois: month, // ex: "2026-05"
+        trimestre: windows.periodeTrimestre, // ex: "2026-T2"
+        annee: windows.periodeAnnee, // ex: "2026-ANNUEL"
+        label: windows.label, // ex: "Mai 2026"
+      },
       omr,
       decheteries,
       ri,
@@ -43,8 +47,8 @@ export async function GET(req: NextRequest) {
   } catch (err) {
     console.error("[api/dashboard] Échec de l'agrégation :", err);
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Erreur interne lors du calcul des indicateurs." },
-      { status: 500 }
+        { error: err instanceof Error ? err.message : "Erreur interne lors du calcul des indicateurs." },
+        { status: 500 }
     );
   }
 }

@@ -25,7 +25,9 @@ type WorkflowId =
     | "piles"
     | "chimirec"
     | "ecodds"
-    | "ecosol";
+    | "ecosol"
+    | "parc_bacs_particuliers"
+    | "parc_cartes_pav";
 
 type ImportResult = {
   inserted: number;
@@ -96,7 +98,7 @@ async function handleSytraival(workbook: XLSX.WorkBook, targetMonth: unknown): P
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
   const monthInfo = parseTargetMonth(targetMonth);
 
-  const toInsert: { date: Date; immatriculation: string; produit: string; poidsNet: number }[] = [];
+  const toInsert: { date: Date; immatriculation: string; produit: string; poidsNet: number; }[] = [];
   let skipped = 0;
 
   for (const row of rows) {
@@ -208,123 +210,267 @@ async function handleCarburant(workbook: XLSX.WorkBook, targetMonth: unknown): P
 
 /* -----------------------------------------------------------------------
  * Workflow "Bio-déchets" — fichier Tableau récap BD Ecovalim
+ * NOUVEAU COMPORTEMENT : On cherche le récapitulatif mensuel en bas du fichier
+ * et on le stocke dans OmrIndicateur.
  * --------------------------------------------------------------------- */
 async function handleBioDechets(workbook: XLSX.WorkBook, targetMonth: unknown): Promise<ImportResult> {
-  const toInsert: { date: Date; idBac: string; poidsKg: number }[] = [];
-  let skipped = 0;
-  let totalCells = 0;
-  const details: string[] = [];
   const monthInfo = parseTargetMonth(targetMonth);
+  if (!monthInfo) {
+    throw new Error("Mois cible manquant ou invalide.");
+  }
 
-  for (const sheetName of workbook.SheetNames) {
-    const sheet = workbook.Sheets[sheetName];
-    const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
-      header: 1,
-      raw: true,
-      defval: null,
-    });
-    if (matrix.length === 0) continue;
+  // 1. Déterminer l'année et le nom du mois qu'on cherche
+  const targetYearStr = String(monthInfo.year); // ex: "2026"
+  const moisCherche = monthInfo.fullLabel.toLowerCase(); // ex: "mai"
+  const moisChercheAbbr = monthInfo.abbrLabel.toLowerCase(); // ex: "mai", "janv", "fév"
 
-    const headerRow = matrix[0] ?? [];
-    const firstCell = headerRow[0];
-    const looksLikePivot = typeof firstCell === "string" && firstCell.trim().toLowerCase() === "bacs";
-    if (!looksLikePivot) continue;
+  // 2. Trouver l'onglet qui correspond à l'année cible (ex: l'onglet nommé "2026")
+  let targetSheetName = workbook.SheetNames.find(name => name.includes(targetYearStr));
 
-    const dateColumns: { index: number; date: Date }[] = [];
-    for (let col = 1; col < headerRow.length; col++) {
-      // Pour le TCD des biodéchets, on essaie de parser la date de la colonne.
-      // S'il n'y a pas de date claire dans la colonne, on utilise le targetMonth en repli.
-      const date = parseExcelDate(headerRow[col]) ?? monthInfo?.refDate ?? null;
-      if (date) dateColumns.push({ index: col, date });
-    }
+  // Si on ne trouve pas l'onglet exact de l'année, on prend le premier par défaut (pour être tolérant)
+  if (!targetSheetName) {
+    targetSheetName = workbook.SheetNames[0];
+  }
 
-    let sheetInserted = 0;
+  const sheet = workbook.Sheets[targetSheetName];
+  // On lit la feuille en mode matrice pour naviguer librement
+  const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: true, defval: null });
 
-    for (let r = 1; r < matrix.length; r++) {
-      const row = matrix[r] ?? [];
-      const idBacRaw = row[0];
+  let totalKg = 0;
+  let found = false;
+  let details = "";
 
-      if (idBacRaw === null || idBacRaw === undefined || idBacRaw === "") break;
-      if (String(idBacRaw).trim().toLowerCase().startsWith("total")) continue;
+  // 3. Recherche du bloc récapitulatif
+  // On cherche une ligne qui contient le mois qu'on veut.
+  for (let r = 0; r < matrix.length; r++) {
+    const row = matrix[r] ?? [];
 
-      const idBac = String(idBacRaw).trim();
+    // On scanne les colonnes de la ligne (on regarde large : jusqu'à la colonne 10/J)
+    for (let c = 0; c < 10; c++) {
+      const cellVal = String(row[c] || "").trim().toLowerCase();
 
-      for (const { index, date } of dateColumns) {
-        totalCells++;
-        const raw = row[index];
+      // Si la cellule correspond à notre mois (ex: "mai" ou "janv")
+      if (cellVal && (moisCherche.startsWith(cellVal) || cellVal.startsWith(moisChercheAbbr))) {
 
-        if (raw === null || raw === undefined || raw === "") continue;
+        // La valeur est TOUJOURS dans la colonne juste à droite (c + 1)
+        const valRaw = row[c + 1];
+        const val = toNumber(valRaw);
 
-        const poidsKg = toNumber(raw);
-        if (Number.isNaN(poidsKg)) {
-          skipped++;
-          continue;
+        if (!Number.isNaN(val) && val > 0) {
+          totalKg = val;
+          found = true;
+          details = `${val} kg trouvés pour ${cellVal} dans l'onglet "${targetSheetName}" (Col: ${c}, Ligne: ${r + 1})`;
+          break; // On a trouvé la valeur, on arrête de chercher sur cette ligne
         }
-
-        toInsert.push({ date, idBac, poidsKg });
-        sheetInserted++;
       }
     }
-
-    details.push(`${sheetName}: ${sheetInserted} pesée(s) dépivotée(s)`);
+    if (found) break; // On a trouvé la valeur, on arrête de scanner les lignes
   }
 
-  if (toInsert.length > 0) {
-    await prisma.bioDechet.createMany({ data: toInsert });
+  // 4. Upsert en base de données si on a trouvé
+  if (found) {
+    const periodeReference = `${monthInfo.year}-${String(monthInfo.monthIndex + 1).padStart(2, "0")}`; // ex: "2026-05"
+
+    await prisma.omrIndicateur.upsert({
+      where: {
+        periodeReference_indicateur: {
+          periodeReference: periodeReference,
+          indicateur: "TOTAL_BIODECHETS",
+        }
+      },
+      update: { valeur: totalKg / 1000 }, // Conversion en Tonnes
+      create: {
+        periodeReference: periodeReference,
+        indicateur: "TOTAL_BIODECHETS",
+        valeur: totalKg / 1000,
+      },
+    });
+
+    return {
+      inserted: 1,
+      skipped: 0,
+      total: 1,
+      details: [details]
+    };
+  } else {
+    return {
+      inserted: 0,
+      skipped: 1,
+      total: 1,
+      details: [`Impossible de trouver le total pour le mois de "${moisCherche}" dans l'onglet "${targetSheetName}".`]
+    };
+  }
+}
+
+/* -----------------------------------------------------------------------
+ * Workflow "Parc Bacs Particuliers"
+ * Donnée globale / instant T (Upsert sans temporalité)
+ * --------------------------------------------------------------------- */
+async function handleParcBacsParticuliers(workbook: XLSX.WorkBook): Promise<ImportResult> {
+  const sheet = firstSheet(workbook);
+  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
+
+  let count = 0;
+  for (const row of rows) {
+    const usagerModele = String(row["USAGER MODELE"] || row["CLIENT_MODELE"] || "").toUpperCase();
+    if (usagerModele.includes("PARTICULIER")) {
+      count++;
+    }
   }
 
-  return { inserted: toInsert.length, skipped, total: totalCells, details };
+  await prisma.omrIndicateur.upsert({
+    where: {
+      periodeReference_indicateur: {
+        periodeReference: "GLOBALE",
+        indicateur: "PARC_BACS_PARTICULIERS",
+      }
+    },
+    update: { valeur: count },
+    create: {
+      periodeReference: "GLOBALE",
+      indicateur: "PARC_BACS_PARTICULIERS",
+      valeur: count,
+    },
+  });
+
+  return {
+    inserted: 1,
+    skipped: 0,
+    total: rows.length,
+    details: [`${count} bacs particuliers comptabilisés et mis à jour.`]
+  };
+}
+
+/* -----------------------------------------------------------------------
+ * Workflow "Parc Cartes PAV OMR"
+ * Donnée globale / instant T
+ * Filtres : PAV + PARTICULIER + AVEC_SUPPORT=1 + CLIENT ACTIF=O
+ * --------------------------------------------------------------------- */
+async function handleParcCartesPav(workbook: XLSX.WorkBook): Promise<ImportResult> {
+  const sheet = firstSheet(workbook);
+  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
+
+  let count = 0;
+  for (const row of rows) {
+    const usagerModele = String(row["USAGER MODELE"] || "").toUpperCase();
+    const avecSupport = toNumber(row["AVEC_SUPPORT"]);
+    const clientActif = String(row["CLIENT ACTIF"] || "").toUpperCase();
+
+    // Check if it's a PAV client. We assume it's implicit in this file, or we check if USAGER MODELE has PAV
+    // The prompt says "filtrer sur client PAV ET PARTICULIER".
+    // In the "liste déposants et supports", everyone is usually a PAV deposant.
+    // Let's apply the strict rules requested:
+    if (
+        usagerModele.includes("PARTICULIER") &&
+        avecSupport === 1 &&
+        clientActif === "O"
+    ) {
+      count++;
+    }
+  }
+
+  await prisma.omrIndicateur.upsert({
+    where: {
+      periodeReference_indicateur: {
+        periodeReference: "GLOBALE",
+        indicateur: "PARC_CARTES_PAV",
+      }
+    },
+    update: { valeur: count },
+    create: {
+      periodeReference: "GLOBALE",
+      indicateur: "PARC_CARTES_PAV",
+      valeur: count,
+    },
+  });
+
+  return {
+    inserted: 1,
+    skipped: 0,
+    total: rows.length,
+    details: [`${count} cartes PAV comptabilisées et mises à jour.`]
+  };
 }
 
 /* -----------------------------------------------------------------------
  * Workflow "Serfim" — fichier SERFIM TABLEAU SMIDOM
  * --------------------------------------------------------------------- */
+/* -----------------------------------------------------------------------
+ * Workflow "Serfim" — NOUVELLE VERSION (Extraction des Totaux Mensuels)
+ * --------------------------------------------------------------------- */
 async function handleSerfim(workbook: XLSX.WorkBook, targetMonth: unknown): Promise<ImportResult> {
-  const toInsert: { date: Date; immatriculation: string; produit: string; poidsNet: number }[] = [];
+  const monthInfo = parseTargetMonth(targetMonth);
+  if (!monthInfo) {
+    throw new Error("Mois cible manquant ou invalide.");
+  }
+
+  let inserted = 0;
   let skipped = 0;
   const details: string[] = [];
-  const monthInfo = parseTargetMonth(targetMonth);
 
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
+    // Lecture brute en matrice pour avoir les vrais index de colonnes (0 = A, 3 = D)
     const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: true, defval: null });
     if (matrix.length === 0) continue;
 
     const headerIndex = findHeaderRowIndex(matrix, "DATE");
-    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
-      range: headerIndex,
-      defval: null,
-    });
-
-    let sheetInserted = 0;
-
-    for (const row of rows) {
-      const date = parseExcelDate(row["DATE"]) ?? monthInfo?.refDate ?? null;
-      const poidsNet = toNumber(row["POIDS"]);
-      const numeroPesee = row["N° PESEE"];
-
-      if (!date || Number.isNaN(poidsNet)) {
-        skipped++;
-        continue;
-      }
-
-      toInsert.push({
-        date,
-        immatriculation: "SERFIM",
-        produit: numeroPesee ? `Transfert Serfim #${numeroPesee}` : "Transfert Serfim",
-        poidsNet,
-      });
-      sheetInserted++;
+    if (headerIndex === -1) {
+      skipped++;
+      continue;
     }
 
-    details.push(`${sheetName}: en-têtes détectés ligne ${headerIndex + 1}, ${sheetInserted} pesée(s)`);
+    let sheetTotalsFound = 0;
+
+    // On boucle sur les données après l'en-tête
+    for (let r = headerIndex + 1; r < matrix.length; r++) {
+      const row = matrix[r] ?? [];
+      if (row.length === 0) continue;
+
+      // Colonne A = DATE (index 0), Colonne D = Total Mois (index 3)
+      const dateRaw = row[0];
+      const totalMoisRaw = row[3];
+
+      const totalMoisValeur = toNumber(totalMoisRaw);
+
+      // On ne s'intéresse QU'AUX LIGNES où la colonne D contient une valeur
+      if (totalMoisRaw !== null && !Number.isNaN(totalMoisValeur) && totalMoisValeur > 0) {
+        const dateExacte = parseExcelDate(dateRaw);
+        if (!dateExacte) continue;
+
+        // On extrait l'année et le mois réel depuis la date pour construire "2026-07"
+        const anneeReal = dateExacte.getFullYear();
+        const moisReal = String(dateExacte.getMonth() + 1).padStart(2, "0");
+        const periodeReference = `${anneeReal}-${moisReal}`;
+
+        // Upsert direct dans OmrIndicateur (table des compteurs mensuels/globaux)
+        // ⚠️ Il n'y a plus aucun appel à prisma.pesee ici !
+        await prisma.omrIndicateur.upsert({
+          where: {
+            periodeReference_indicateur: {
+              periodeReference: periodeReference,
+              indicateur: "TRANSFERT_SERFIM",
+            },
+          },
+          update: { valeur: totalMoisValeur },
+          create: {
+            periodeReference: periodeReference,
+            indicateur: "TRANSFERT_SERFIM",
+            valeur: totalMoisValeur,
+          },
+        });
+
+        sheetTotalsFound++;
+        inserted++;
+      }
+    }
+
+    if (sheetTotalsFound > 0) {
+      details.push(`${sheetName} : ${sheetTotalsFound} total(totaux) mensuel(s) extrait(s) avec succès.`);
+    }
   }
 
-  if (toInsert.length > 0) {
-    await prisma.pesee.createMany({ data: toInsert });
-  }
-
-  return { inserted: toInsert.length, skipped, total: toInsert.length + skipped, details };
+  return { inserted, skipped, total: inserted + skipped, details };
 }
 
 /* =========================================================================
@@ -339,11 +485,14 @@ async function handlePassages(workbook: XLSX.WorkBook, targetMonth: unknown): Pr
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
   const monthInfo = parseTargetMonth(targetMonth);
 
-  const toInsert: { datePassage: Date; site: string; typeUsager: string | null }[] = [];
+  // Attention : Assure-toi que periodeReference existe bien dans ton schéma Prisma,
+  // sinon retire-le de ce type et du toInsert.push()
+  const toInsert: { datePassage: Date; site: string; typeUsager: string | null; periodeReference: string; }[] = [];
   let skipped = 0;
 
   for (const row of rows) {
-    if (row["STATUT"] === "I" || row["COMPTABILISE"] === "NON") {
+    const comptabilise = String(row["COMPTABILISE"] || "").toUpperCase();
+    if (comptabilise !== "OUI") {
       skipped++;
       continue;
     }
@@ -359,7 +508,17 @@ async function handlePassages(workbook: XLSX.WorkBook, targetMonth: unknown): Pr
       continue;
     }
 
-    toInsert.push({ datePassage, site, typeUsager });
+    if (monthInfo?.refDate) {
+      const isSameMonth = datePassage.getMonth() === monthInfo.refDate.getMonth();
+      const isSameYear = datePassage.getFullYear() === monthInfo.refDate.getFullYear();
+
+      if (!isSameMonth || !isSameYear) {
+        skipped++;
+        continue; // On ignore les lignes qui ne sont pas du bon mois/année
+      }
+    }
+
+    toInsert.push({ datePassage, site, typeUsager, periodeReference: targetMonth as string });
   }
 
   if (toInsert.length > 0) {
@@ -377,7 +536,7 @@ async function handleEgt(workbook: XLSX.WorkBook, targetMonth: unknown): Promise
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
   const monthInfo = parseTargetMonth(targetMonth);
 
-  const toInsert: { dateCollecte: Date; site: string; categorieFlux: string; prestataire: string; matiere: string; poidsTonnes: number }[] = [];
+  const toInsert: { dateCollecte: Date; site: string; categorieFlux: string; prestataire: string; matiere: string; poidsTonnes: number; periodeReference: string; }[] = [];
   let skipped = 0;
 
   for (const row of rows) {
@@ -392,7 +551,17 @@ async function handleEgt(workbook: XLSX.WorkBook, targetMonth: unknown): Promise
       continue;
     }
 
-    toInsert.push({ dateCollecte, site, categorieFlux: "PAYANT", prestataire: "EGT", matiere, poidsTonnes });
+    if (monthInfo?.refDate) {
+      const isSameMonth = dateCollecte.getMonth() === monthInfo.refDate.getMonth();
+      const isSameYear = dateCollecte.getFullYear() === monthInfo.refDate.getFullYear();
+
+      if (!isSameMonth || !isSameYear) {
+        skipped++;
+        continue; // On ignore les lignes qui ne sont pas du bon mois/année
+      }
+    }
+
+    toInsert.push({ dateCollecte, site, categorieFlux: "PAYANT", prestataire: "EGT", matiere, poidsTonnes, periodeReference: targetMonth as string });
   }
 
   if (toInsert.length > 0) {
@@ -442,7 +611,7 @@ async function handleD3E(workbook: XLSX.WorkBook, targetMonth: unknown): Promise
     }
   }
 
-  const toInsert: { dateCollecte: Date; site: string; categorieFlux: string; prestataire: string; matiere: string; poidsTonnes: number }[] = [];
+  const toInsert: { dateCollecte: Date; site: string; categorieFlux: string; prestataire: string; matiere: string; poidsTonnes: number; periodeReference: string; }[] = [];
   let skipped = 0;
   let matched = 0;
 
@@ -476,6 +645,7 @@ async function handleD3E(workbook: XLSX.WorkBook, targetMonth: unknown): Promise
         prestataire: "D3E",
         matiere,
         poidsTonnes,
+        periodeReference: targetMonth as string,
       });
     }
   }
@@ -500,7 +670,7 @@ async function handlePiles(workbook: XLSX.WorkBook, targetMonth: unknown): Promi
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
   const monthInfo = parseTargetMonth(targetMonth);
 
-  const toInsert: { dateCollecte: Date; site: string; categorieFlux: string; prestataire: string; matiere: string; poidsTonnes: number }[] = [];
+  const toInsert: { dateCollecte: Date; site: string; categorieFlux: string; prestataire: string; matiere: string; poidsTonnes: number; periodeReference: string; }[] = [];
   let skipped = 0;
 
   for (const row of rows) {
@@ -513,6 +683,16 @@ async function handlePiles(workbook: XLSX.WorkBook, targetMonth: unknown): Promi
       continue;
     }
 
+    if (monthInfo?.refDate) {
+      const isSameMonth = dateCollecte.getMonth() === monthInfo.refDate.getMonth();
+      const isSameYear = dateCollecte.getFullYear() === monthInfo.refDate.getFullYear();
+
+      if (!isSameMonth || !isSameYear) {
+        skipped++;
+        continue; // On ignore les lignes qui ne sont pas du bon mois/année
+      }
+    }
+
     toInsert.push({
       dateCollecte,
       site,
@@ -520,6 +700,7 @@ async function handlePiles(workbook: XLSX.WorkBook, targetMonth: unknown): Promi
       prestataire: "Piles",
       matiere: "PILES",
       poidsTonnes: poidsKg / 1000,
+      periodeReference: targetMonth as string,
     });
   }
 
@@ -538,7 +719,7 @@ async function handleChimirec(workbook: XLSX.WorkBook, targetMonth: unknown): Pr
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
   const monthInfo = parseTargetMonth(targetMonth);
 
-  const toInsert: { dateCollecte: Date; site: string; categorieFlux: string; prestataire: string; matiere: string; poidsTonnes: number }[] = [];
+  const toInsert: { dateCollecte: Date; site: string; categorieFlux: string; prestataire: string; matiere: string; poidsTonnes: number; periodeReference: string; }[] = [];
   let skipped = 0;
 
   for (const row of rows) {
@@ -553,7 +734,17 @@ async function handleChimirec(workbook: XLSX.WorkBook, targetMonth: unknown): Pr
       continue;
     }
 
-    toInsert.push({ dateCollecte, site, categorieFlux: "PAYANT", prestataire: "Chimirec", matiere, poidsTonnes });
+    if (monthInfo?.refDate) {
+      const isSameMonth = dateCollecte.getMonth() === monthInfo.refDate.getMonth();
+      const isSameYear = dateCollecte.getFullYear() === monthInfo.refDate.getFullYear();
+
+      if (!isSameMonth || !isSameYear) {
+        skipped++;
+        continue; // On ignore les lignes qui ne sont pas du bon mois/année
+      }
+    }
+
+    toInsert.push({ dateCollecte, site, categorieFlux: "PAYANT", prestataire: "Chimirec", matiere, poidsTonnes, periodeReference: targetMonth as string });
   }
 
   if (toInsert.length > 0) {
@@ -571,7 +762,7 @@ async function handleEcoDDS(workbook: XLSX.WorkBook, targetMonth: unknown): Prom
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
   const monthInfo = parseTargetMonth(targetMonth);
 
-  const toInsert: { dateCollecte: Date; site: string; categorieFlux: string; prestataire: string; matiere: string; poidsTonnes: number }[] = [];
+  const toInsert: { dateCollecte: Date; site: string; categorieFlux: string; prestataire: string; matiere: string; poidsTonnes: number; periodeReference: string; }[] = [];
   let skipped = 0;
 
   for (const row of rows) {
@@ -586,7 +777,17 @@ async function handleEcoDDS(workbook: XLSX.WorkBook, targetMonth: unknown): Prom
       continue;
     }
 
-    toInsert.push({ dateCollecte, site, categorieFlux: "REP", prestataire: "EcoDDS", matiere, poidsTonnes });
+    if (monthInfo?.refDate) {
+      const isSameMonth = dateCollecte.getMonth() === monthInfo.refDate.getMonth();
+      const isSameYear = dateCollecte.getFullYear() === monthInfo.refDate.getFullYear();
+
+      if (!isSameMonth || !isSameYear) {
+        skipped++;
+        continue; // On ignore les lignes qui ne sont pas du bon mois/année
+      }
+    }
+
+    toInsert.push({ dateCollecte, site, categorieFlux: "REP", prestataire: "EcoDDS", matiere, poidsTonnes, periodeReference: targetMonth as string });
   }
 
   if (toInsert.length > 0) {
@@ -602,14 +803,35 @@ async function handleEcoDDS(workbook: XLSX.WorkBook, targetMonth: unknown): Prom
 const ECOSOL_TARGET_ROW_INDEX = 28;
 
 async function handleEcoSol(workbook: XLSX.WorkBook, targetMonth: unknown): Promise<ImportResult> {
-  const monthInfo = parseTargetMonth(targetMonth);
-  if (!monthInfo) {
+  // 1. Validation et parsing du nouveau format (ex: "2026-T1")
+  const periodStr = String(targetMonth).trim();
+  const match = periodStr.match(/^(\d{4})-T([1-4])$/);
+
+  if (!match) {
     throw new Error(
-        "Le mois cible (targetMonth, format AAAA-MM) est obligatoire pour le workflow Eco'Sol : il sert à cibler la bonne colonne du tableau croisé."
+        `Le format de la période est invalide pour Eco'Sol. Reçu : "${periodStr}". Attendu : AAAA-TX (ex: 2026-T1).`
     );
   }
 
-  const toInsert: { dateCollecte: Date; site: string; categorieFlux: string; prestataire: string; matiere: string; poidsTonnes: number }[] = [];
+  const year = parseInt(match[1], 10);
+  const quarter = parseInt(match[2], 10); // 1, 2, 3 ou 4
+  const periodeReference = periodStr; // "2026-T1"
+
+  // Création d'une date pivot pour Prisma (1er jour du premier mois du trimestre)
+  // T1 = Janvier (0), T2 = Avril (3), T3 = Juillet (6), T4 = Octobre (9)
+  const pivotMonthIndex = (quarter - 1) * 3;
+  const dateCollecte = new Date(year, pivotMonthIndex, 1);
+
+  const toInsert: {
+    dateCollecte: Date;
+    periodeReference: string;
+    site: string;
+    categorieFlux: string;
+    prestataire: string;
+    matiere: string;
+    poidsTonnes: number;
+  }[] = [];
+
   let skipped = 0;
   const details: string[] = [];
 
@@ -617,47 +839,43 @@ async function handleEcoSol(workbook: XLSX.WorkBook, targetMonth: unknown): Prom
     const sheet = workbook.Sheets[sheetName];
     const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: true, defval: null });
 
-    if (matrix.length <= ECOSOL_TARGET_ROW_INDEX) {
+    // 2. On cible la colonne "Total T[x]" en cherchant dans l'en-tête (ligne 6)
+    const headerRow = matrix[6] ?? [];
+    const targetHeader = `Total T${quarter}`; // ex: "Total T1"
+
+    const monthCol = headerRow.findIndex(
+        (c) => typeof c === "string" && c.trim().toLowerCase() === targetHeader.toLowerCase()
+    );
+
+    if (monthCol === -1) {
       skipped++;
-      details.push(`${sheetName} : feuille trop courte (ligne 29 introuvable), ignorée`);
+      details.push(`${sheetName} : colonne "${targetHeader}" introuvable, ignorée`);
       continue;
     }
 
-    let monthCol: number | null = null;
-    for (let r = 0; r < Math.min(matrix.length, 12) && monthCol === null; r++) {
-      const row = matrix[r] ?? [];
-      for (let c = 0; c < row.length; c++) {
-        const cell = row[c];
-        if (typeof cell === "string" && cell.trim().toLowerCase() === monthInfo.fullLabel.toLowerCase()) {
-          monthCol = c;
-          break;
-        }
-      }
-    }
-
-    if (monthCol === null) {
-      monthCol = 2 + (monthInfo.monthIndex % 3);
-    }
-
+    // 3. Récupération de la donnée à la ligne 29 (index 28)
+    // Assure-toi que ECOSOL_TARGET_ROW_INDEX est bien défini dans ton fichier (ex: const ECOSOL_TARGET_ROW_INDEX = 28;)
     const targetRow = matrix[ECOSOL_TARGET_ROW_INDEX] ?? [];
     const raw = targetRow[monthCol];
     const poidsKg = toNumber(raw);
 
     if (raw === null || raw === undefined || raw === "" || Number.isNaN(poidsKg)) {
       skipped++;
-      details.push(`${sheetName} : aucune valeur exploitable (ligne 29, colonne ${monthCol})`);
+      details.push(`${sheetName} : aucune valeur exploitable à la ligne 29, colonne ${monthCol}`);
       continue;
     }
 
+    // 4. Insertion avec la periodeReference reçue du frontend
     toInsert.push({
-      dateCollecte: monthInfo.refDate,
+      dateCollecte: dateCollecte,
+      periodeReference: periodeReference,
       site: sheetName.trim(),
       categorieFlux: "REP",
       prestataire: "Eco'Sol",
       matiere: "Détournement",
       poidsTonnes: poidsKg / 1000,
     });
-    details.push(`${sheetName} : ${poidsKg} kg détectés (colonne ${monthCol})`);
+    details.push(`${sheetName} : ${poidsKg} kg détectés pour ${periodeReference}`);
   }
 
   if (toInsert.length > 0) {
@@ -751,6 +969,12 @@ export async function POST(req: NextRequest) {
         break;
       case "ecosol":
         result = await handleEcoSol(workbook, targetMonth);
+        break;
+      case "parc_bacs_particuliers":
+        result = await handleParcBacsParticuliers(workbook);
+        break;
+      case "parc_cartes_pav":
+        result = await handleParcCartesPav(workbook);
         break;
       default:
         return NextResponse.json({ error: `Workflow inconnu : "${workflow}".` }, { status: 400 });

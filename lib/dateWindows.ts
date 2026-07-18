@@ -9,12 +9,11 @@ import { parseTargetMonth } from "@/lib/targetMonth";
  *   tables à grain fin (Pesee, SuiviVehicule, BioDechet, DechetteriePassage,
  *   DechetterieFlux), filtrées avec `date: { gte: start, lt: end }`.
  * - `moisReferenceList` / `cumulReferenceList` / … : listes de chaînes
- *   "AAAA-MM" pour les tables déjà pré-agrégées par mois (RiIndicateur,
- *   CsIndicateur), filtrées avec `moisReference: { in: [...] }`.
- *
- * Toute la logique de calendrier vit ICI et nulle part ailleurs : chaque
- * requête KPI se contente de fournir un "sumFn(range)" ou de consommer les
- * listes de moisReference, sans jamais recalculer une borne de date.
+ *   "AAAA-MM" pour les tables déjà pré-agrégées par mois (désormais via le
+ *   champ `periodeReference`).
+ * - `periodeTrimestre` / `periodeAnnee` / `periodeGlobale` : nouvelles clés
+ *   qui permettent de requêter directement les indicateurs trimestriels,
+ *   annuels ou à l'instant T dans la BDD.
  */
 
 export type DateRange = { start: Date; end: Date };
@@ -25,11 +24,21 @@ export type FourWindows = {
   moisN1: DateRange;
   cumulN1: DateRange;
 
-  /** Pour les tables pré-agrégées (RiIndicateur, CsIndicateur). */
+  /** Pour les tables pré-agrégées (RiIndicateur, CsIndicateur, OmrIndicateur) au format mensuel. */
   moisReferenceList: string[];
   cumulReferenceList: string[];
   moisReferenceN1: string;
   cumulReferenceN1List: string[];
+
+  // NOUVEAUX CHAMPS TEMPORELS POUR LA BDD (champ `periodeReference`) :
+  periodeMois: string;       // ex: "2026-05"
+  periodeTrimestre: string;  // ex: "2026-T2"
+  periodeAnnee: string;      // ex: "2026-ANNUEL"
+  periodeGlobale: string;    // Toujours "GLOBALE"
+
+  // Historique des nouvelles périodes :
+  periodeTrimestreN1: string; // ex: "2025-T2"
+  periodeAnneeN1: string;     // ex: "2025-ANNUEL"
 
   /** Utile pour l'affichage ("Mai 2026", "Janv. - Mai 2026"…). */
   label: { mois: string; moisN1: string; year: number; yearN1: number; monthIndex: number };
@@ -57,21 +66,38 @@ export function computeFourWindows(targetMonth: string): FourWindows {
   const yearStartN1 = new Date(Date.UTC(yearN1, 0, 1));
   const cumulEndN1 = monthEndN1;
 
+  // Listes de références mensuelles
   const pad = (n: number) => String(n).padStart(2, "0");
   const moisReferenceList = [`${year}-${pad(monthIndex + 1)}`];
   const cumulReferenceList = Array.from({ length: monthIndex + 1 }, (_, i) => `${year}-${pad(i + 1)}`);
   const moisReferenceN1 = `${yearN1}-${pad(monthIndex + 1)}`;
   const cumulReferenceN1List = Array.from({ length: monthIndex + 1 }, (_, i) => `${yearN1}-${pad(i + 1)}`);
 
+  // Calcul du trimestre (1 à 4)
+  // monthIndex est 0-indexé (0 = Janvier, 11 = Décembre), donc on ajoute 1 pour le calcul
+  const quarter = Math.ceil((monthIndex + 1) / 3);
+
   return {
     mois: { start: monthStart, end: monthEnd },
     cumul: { start: yearStart, end: cumulEnd },
     moisN1: { start: monthStartN1, end: monthEndN1 },
     cumulN1: { start: yearStartN1, end: cumulEndN1 },
+
     moisReferenceList,
     cumulReferenceList,
     moisReferenceN1,
     cumulReferenceN1List,
+
+    // Les clés exactes qui serviront à interroger le champ `periodeReference` de Prisma
+    periodeMois: targetMonth,
+    periodeTrimestre: `${year}-T${quarter}`,
+    periodeAnnee: `${year}-ANNUEL`,
+    periodeGlobale: "GLOBALE",
+
+    // Historique
+    periodeTrimestreN1: `${yearN1}-T${quarter}`,
+    periodeAnneeN1: `${yearN1}-ANNUEL`,
+
     label: { mois: info.fullLabel, moisN1: info.fullLabel, year, yearN1, monthIndex },
   };
 }
@@ -111,12 +137,12 @@ export function buildKpiWindow(mois: number, cumul: number, moisN1: number, cumu
  * LE mécanisme générique anti-duplication : prend une simple fonction
  * `sumFn(range) => Promise<number>` (typiquement un `prisma.xxx.aggregate`
  * ou `.count` sur UNE table) et l'exécute en parallèle sur les 4 fenêtres.
- * Chaque KPI "à grain fin" (Pesee, BioDechet, DechetterieFlux, Passage…)
+ * Chaque KPI "à grain fin" (Pesee, DechetterieFlux, Passage…)
  * se résume donc à UNE fonction d'une ligne + un appel à `sumFourWindows`.
  */
 export async function sumFourWindows(
-  windows: FourWindows,
-  sumFn: (range: DateRange) => Promise<number>
+    windows: FourWindows,
+    sumFn: (range: DateRange) => Promise<number>
 ): Promise<KpiWindow> {
   const [mois, cumul, moisN1, cumulN1] = await Promise.all([
     sumFn(windows.mois),

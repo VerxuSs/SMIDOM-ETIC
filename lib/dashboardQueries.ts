@@ -13,16 +13,11 @@ import {
  * Onglet 1 — Collecte (OMR)
  * ======================================================================= */
 
-/**
- * Pesee et Vehicule ne sont PAS reliés par une relation Prisma (choix fait
- * lors de l'import : certaines pesées, ex. Serfim, ne référencent aucun
- * véhicule réel). On fait donc la jointure "à la main" en 2 requêtes :
- * d'abord la liste des immatriculations pour une fonction donnée, puis le
- * filtre sur Pesee.
- */
-async function getImmatriculationsByFonction(fonction: string): Promise<string[]> {
+// Récupère les plaques d'immatriculation associées à une ou plusieurs fonctions
+async function getImmatriculationsByFonction(fonctions: string | string[]): Promise<string[]> {
+  const condition = Array.isArray(fonctions) ? { in: fonctions } : fonctions;
   const vehicules = await prisma.vehicule.findMany({
-    where: { fonction },
+    where: { fonction: condition },
     select: { immatriculation: true },
   });
   return vehicules.map((v) => v.immatriculation);
@@ -30,7 +25,6 @@ async function getImmatriculationsByFonction(fonction: string): Promise<string[]
 
 async function kpiCollecteParFonction(fonction: string, windows: FourWindows): Promise<KpiWindow> {
   const immats = await getImmatriculationsByFonction(fonction);
-
   const sumFn = async (range: DateRange): Promise<number> => {
     if (immats.length === 0) return 0;
     const result = await prisma.pesee.aggregate({
@@ -39,48 +33,94 @@ async function kpiCollecteParFonction(fonction: string, windows: FourWindows): P
     });
     return result._sum.poidsNet ?? 0;
   };
-
   return sumFourWindows(windows, sumFn);
 }
 
-async function kpiBioDechetsTotal(windows: FourWindows): Promise<KpiWindow> {
+// Calcule le total Sytraival (Somme de BOM, PAV et Entretien PAV)
+async function kpiTotalOmrSytraival(windows: FourWindows): Promise<KpiWindow> {
+  const immats = await getImmatriculationsByFonction(["Collecte BOM", "Collecte PAV", "Collecte entretien PAV"]);
   const sumFn = async (range: DateRange): Promise<number> => {
-    const result = await prisma.bioDechet.aggregate({
-      _sum: { poidsKg: true },
-      where: { date: { gte: range.start, lt: range.end } },
+    if (immats.length === 0) return 0;
+    const result = await prisma.pesee.aggregate({
+      _sum: { poidsNet: true },
+      where: { immatriculation: { in: immats }, date: { gte: range.start, lt: range.end } },
     });
-    return (result._sum.poidsKg ?? 0) / 1000; // kg -> tonnes
+    return result._sum.poidsNet ?? 0;
   };
   return sumFourWindows(windows, sumFn);
 }
 
+// Transfert Serfim (identifié par l'immatriculation factice "SERFIM" lors de l'import)
+async function kpiTransfertSerfim(windows: FourWindows): Promise<KpiWindow> {
+  const sumFn = async (range: DateRange): Promise<number> => {
+    const result = await prisma.pesee.aggregate({
+      _sum: { poidsNet: true },
+      where: { immatriculation: "SERFIM", date: { gte: range.start, lt: range.end } },
+    });
+    return result._sum.poidsNet ?? 0;
+  };
+  return sumFourWindows(windows, sumFn);
+}
+
+// --- Helpers pour la nouvelle table OmrIndicateur ---
+async function sumOmrValeurs(indicateur: string, periodes: string[]): Promise<number> {
+  if (periodes.length === 0) return 0;
+  const rows = await prisma.omrIndicateur.findMany({
+    where: { indicateur, periodeReference: { in: periodes } },
+    select: { valeur: true },
+  });
+  return rows.reduce((acc, r) => acc + r.valeur, 0);
+}
+
+async function getOmrValeur(indicateur: string, periode: string): Promise<number> {
+  const row = await prisma.omrIndicateur.findUnique({
+    where: { periodeReference_indicateur: { periodeReference: periode, indicateur } },
+  });
+  return row?.valeur ?? 0;
+}
+
 export async function getOmrTab(windows: FourWindows) {
-  const [collecteBOM, collectePAV, collecteEntretienPAV, bioDechets] = await Promise.all([
+  const [
+    collecteBOM,
+    collectePAV,
+    collecteEntretienPAV,
+    totalOmrSytraival,
+    transfertSerfim,
+
+    // Bio-déchets (Flux mensuel)
+    bioMois, bioCumul, bioMoisN1, bioCumulN1,
+
+    // Parcs (Instantanés globaux)
+    parcBacs,
+    parcCartes
+  ] = await Promise.all([
     kpiCollecteParFonction("Collecte BOM", windows),
     kpiCollecteParFonction("Collecte PAV", windows),
     kpiCollecteParFonction("Collecte entretien PAV", windows),
-    kpiBioDechetsTotal(windows),
+    kpiTotalOmrSytraival(windows),
+    kpiTransfertSerfim(windows),
+
+    // Récupération des Bio-déchets
+    sumOmrValeurs("TOTAL_BIODECHETS", windows.moisReferenceList),
+    sumOmrValeurs("TOTAL_BIODECHETS", windows.cumulReferenceList),
+    sumOmrValeurs("TOTAL_BIODECHETS", [windows.moisReferenceN1]),
+    sumOmrValeurs("TOTAL_BIODECHETS", windows.cumulReferenceN1List),
+
+    // Récupération des données globales
+    getOmrValeur("PARC_BACS_PARTICULIERS", windows.periodeGlobale),
+    getOmrValeur("PARC_CARTES_PAV", windows.periodeGlobale),
   ]);
 
   return {
     collecteBOM,
     collectePAV,
     collecteEntretienPAV,
-    // ⚠️ Le schéma BioDechet n'a pas de champ pour distinguer "abri bacs" /
-    // "composteur établissement" / "composteur public" (seulement `idBac`).
-    // On expose donc le TOTAL réel ici. Pour restituer la répartition
-    // demandée dans la maquette PDF, il faudrait soit un champ
-    // `typeContenant` sur BioDechet, soit un référentiel idBac -> type.
-    bioDechetsTotal: bioDechets,
-    // Activité "particuliers" : aucune table ne porte ces données
-    // aujourd'hui (nombre de levées, parc de bacs). Mockées explicitement,
-    // à remplacer dès qu'un import Styx/RI dédié existera.
-    activiteParticuliers: {
-      mocked: true,
-      nombreLevees: buildKpiWindow(14000, 27500, 13500, 26200),
-      parcBacs: buildKpiWindow(17000, 17000, 16700, 16700),
-      moyenneLeveesParBac: buildKpiWindow(0.82, 1.61, 0.81, 1.57),
-    },
+    totalOmrSytraival,
+    transfertSerfim,
+    // Formatage manuel des KPI via buildKpiWindow
+    bioDechetsTotal: buildKpiWindow(bioMois, bioCumul, bioMoisN1, bioCumulN1),
+    parcBacsParticuliers: buildKpiWindow(parcBacs, parcBacs, parcBacs, parcBacs),
+    parcCartesPav: buildKpiWindow(parcCartes, parcCartes, parcCartes, parcCartes),
   };
 }
 
@@ -140,13 +180,40 @@ async function kpiEgtTotal(windows: FourWindows): Promise<KpiWindow> {
 }
 
 export async function getDecheteriesTab(windows: FourWindows) {
+  // 1. Définir une fonction pour récupérer le total selon la période
+  // On utilise une fonction générique pour ne pas dupliquer la logique
+  const sumEcoSol = async (periode: string): Promise<number> => {
+    const res = await prisma.dechetterieFlux.aggregate({
+      where: { prestataire: "Eco'Sol", periodeReference: periode },
+      _sum: { poidsTonnes: true }
+    });
+    return res._sum.poidsTonnes ?? 0;
+  };
+
+  // 2. Récupérer les valeurs pour les 4 fenêtres (Mois, Cumul, N-1, Cumul N-1)
+  // Note : pour Eco'Sol qui est TRIMESTRIEL, on utilise la logique trimestrielle
+  const [mois, cumul, moisN1, cumulN1] = await Promise.all([
+    sumEcoSol(windows.periodeTrimestre),      // Trimestre actuel
+    sumEcoSol(windows.periodeAnnee),          // Année actuelle (Cumul)
+    sumEcoSol(windows.periodeTrimestreN1),    // Trimestre N-1
+    sumEcoSol(windows.periodeAnneeN1),        // Année N-1 (Cumul)
+  ]);
+
+  const ecoSolKpi = buildKpiWindow(mois, cumul, moisN1, cumulN1);
+
+  // 3. Appel des autres fonctions existantes
   const [passagesParSite, fluxPayantsParMatiere, egtTotal] = await Promise.all([
     kpiPassagesParSite(windows),
     kpiFluxPayantsParMatiere(windows),
     kpiEgtTotal(windows),
   ]);
 
-  return { passagesParSite, fluxPayantsParMatiere, egtTotal };
+  return {
+    passagesParSite,
+    ecoSol: ecoSolKpi,
+    fluxPayantsParMatiere,
+    egtTotal
+  };
 }
 
 /* =========================================================================
@@ -165,38 +232,47 @@ export async function getDecheteriesTab(windows: FourWindows) {
  */
 type RiIndicatorKind = "FLOW" | "SNAPSHOT";
 
-async function sumRiValeurs(indicateur: string, moisReferences: string[]): Promise<number> {
-  if (moisReferences.length === 0) return 0;
+async function sumRiValeurs(indicateur: string, periodes: string[]): Promise<number> {
+  if (periodes.length === 0) return 0;
   const rows = await prisma.riIndicateur.findMany({
-    where: { indicateur, moisReference: { in: moisReferences } },
+    where: { indicateur, periodeReference: { in: periodes } },
     select: { valeur: true },
   });
   return rows.reduce((acc, r) => acc + r.valeur, 0);
 }
 
-async function getRiValeur(indicateur: string, moisReference: string): Promise<number> {
+async function getRiValeur(indicateur: string, periode: string): Promise<number> {
   const row = await prisma.riIndicateur.findUnique({
-    where: { moisReference_indicateur: { moisReference, indicateur } },
+    where: { periodeReference_indicateur: { periodeReference: periode, indicateur } },
   });
   return row?.valeur ?? 0;
 }
 
+// 1. Pour les flux (Mouvements) : utilisation de windows.periodeAnnee
 async function riFlowWindow(indicateur: string, windows: FourWindows): Promise<KpiWindow> {
-  const [mois, cumul, moisN1, cumulN1] = await Promise.all([
-    sumRiValeurs(indicateur, windows.moisReferenceList),
-    sumRiValeurs(indicateur, windows.cumulReferenceList),
-    sumRiValeurs(indicateur, [windows.moisReferenceN1]),
-    sumRiValeurs(indicateur, windows.cumulReferenceN1List),
+  // Les mouvements sont annuels, on interroge l'année
+  const [valeur, n1] = await Promise.all([
+    getRiValeur(indicateur, windows.periodeAnnee),
+    getRiValeur(indicateur, windows.periodeAnneeN1)
   ]);
-  return buildKpiWindow(mois, cumul, moisN1, cumulN1);
+  return buildKpiWindow(valeur, valeur, n1, n1);
 }
 
+// 2. Pour les Snapshots (Parcs, Redevables) : utilisation de windows.periodeGlobale
 async function riSnapshotWindow(indicateur: string, windows: FourWindows): Promise<KpiWindow> {
-  const mois = await getRiValeur(indicateur, windows.moisReferenceList[0]);
-  const moisN1 = await getRiValeur(indicateur, windows.moisReferenceN1);
-  // Pour un stock, le "cumul" pertinent est la valeur constatée en fin de
-  // période, identique à "mois" — jamais une somme des photos mensuelles.
-  return buildKpiWindow(mois, mois, moisN1, moisN1);
+  const valeur = await getRiValeur(indicateur, windows.periodeGlobale);
+  // Pour le snapshot, on n'a pas toujours de N-1 historique,
+  // on peut renvoyer la valeur courante en attendant.
+  return buildKpiWindow(valeur, valeur, valeur, valeur);
+}
+
+// 3. Pour les Anomalies (Trimestrielles) : utilisation de windows.periodeTrimestre
+async function riTrimestrielWindow(indicateur: string, windows: FourWindows): Promise<KpiWindow> {
+  const [valeur, n1] = await Promise.all([
+    getRiValeur(indicateur, windows.periodeTrimestre),
+    getRiValeur(indicateur, windows.periodeTrimestreN1)
+  ]);
+  return buildKpiWindow(valeur, valeur, n1, n1);
 }
 
 async function computeRiIndicator(indicateur: string, kind: RiIndicatorKind, windows: FourWindows): Promise<KpiWindow> {
@@ -205,21 +281,21 @@ async function computeRiIndicator(indicateur: string, kind: RiIndicatorKind, win
 
 export async function getRiTab(windows: FourWindows) {
   const [arrivees, departs, redevablesPart, redevablesPro, redevablesAdmin, clientsBac, clientsSac, clientsConvention, clientsPav, anomalie0Levee, anomalie0Depot, sansDotation, dossiersEnCours] =
-    await Promise.all([
-      computeRiIndicator("ARRIVEES_CLIENTS", "FLOW", windows),
-      computeRiIndicator("DEPARTS_CLIENTS", "FLOW", windows),
-      computeRiIndicator("REDEVABLES_PART", "SNAPSHOT", windows),
-      computeRiIndicator("REDEVABLES_PRO", "SNAPSHOT", windows),
-      computeRiIndicator("REDEVABLES_ADMIN", "SNAPSHOT", windows),
-      computeRiIndicator("CLIENTS_BAC", "SNAPSHOT", windows),
-      computeRiIndicator("CLIENTS_SAC", "SNAPSHOT", windows),
-      computeRiIndicator("CLIENTS_CONVENTION", "SNAPSHOT", windows),
-      computeRiIndicator("CLIENTS_PAV", "SNAPSHOT", windows),
-      computeRiIndicator("ANOMALIE_0_LEVEE", "SNAPSHOT", windows),
-      computeRiIndicator("ANOMALIE_0_DEPOT", "SNAPSHOT", windows),
-      computeRiIndicator("CLIENTS_SANS_DOTATION", "SNAPSHOT", windows),
-      computeRiIndicator("DOSSIERS_EN_COURS", "SNAPSHOT", windows),
-    ]);
+      await Promise.all([
+        riFlowWindow("ARRIVEES_CLIENTS", windows),          // Annuel
+        riFlowWindow("DEPARTS_CLIENTS", windows),           // Annuel
+        riSnapshotWindow("REDEVABLES_PART", windows),       // Global
+        riSnapshotWindow("REDEVABLES_PRO", windows),        // Global
+        riSnapshotWindow("REDEVABLES_ADMIN", windows),      // Global
+        riSnapshotWindow("CLIENTS_BAC", windows),           // Global
+        riSnapshotWindow("CLIENTS_SAC", windows),           // Global
+        riTrimestrielWindow("CLIENTS_CONVENTION", windows), // Trimestriel
+        riSnapshotWindow("CLIENTS_PAV", windows),           // Global
+        riTrimestrielWindow("ANOMALIE_0_LEVEE", windows),   // Trimestriel
+        riTrimestrielWindow("ANOMALIE_0_DEPOT", windows),   // Trimestriel
+        riTrimestrielWindow("CLIENTS_SANS_DOTATION", windows), // Trimestriel
+        riTrimestrielWindow("DOSSIERS_EN_COURS", windows),     // Trimestriel
+      ]);
 
   return {
     mouvements: { arrivees, departs },
@@ -238,13 +314,15 @@ export async function getRiTab(windows: FourWindows) {
  * Onglet 4 — Collecte Sélective (CS)
  * ======================================================================= */
 
-/** CsIndicateur stocke de vrais flux mensuels (tonnages, litres, km parcourus
- * dans le mois) : contrairement au RI, sommer plusieurs mois pour un cumul
- * YTD est ici toujours sémantiquement correct. */
+// NOUVEAU CODE : On utilise `periodeReference` au lieu de `moisReference`
+
 async function sumCsValeurs(indicateur: string, moisReferences: string[]): Promise<number> {
   if (moisReferences.length === 0) return 0;
   const rows = await prisma.csIndicateur.findMany({
-    where: { indicateur, moisReference: { in: moisReferences } },
+    where: {
+      indicateur,
+      periodeReference: { in: moisReferences }
+    },
     select: { valeur: true },
   });
   return rows.reduce((acc, r) => acc + r.valeur, 0);
@@ -252,7 +330,12 @@ async function sumCsValeurs(indicateur: string, moisReferences: string[]): Promi
 
 async function getCsValeur(indicateur: string, moisReference: string): Promise<number> {
   const row = await prisma.csIndicateur.findUnique({
-    where: { moisReference_indicateur: { moisReference, indicateur } },
+    where: {
+      periodeReference_indicateur: {
+        periodeReference: moisReference,
+        indicateur
+      }
+    },
   });
   return row?.valeur ?? 0;
 }

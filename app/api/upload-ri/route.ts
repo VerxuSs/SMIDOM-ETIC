@@ -2,21 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import * as XLSX from "xlsx";
 import { prisma } from "@/lib/prisma";
 
-// La lecture de fichiers volumineux (jusqu'à ~30 000 lignes) avec `xlsx`
-// nécessite le runtime Node.js (non compatible avec le runtime "edge").
 export const runtime = "nodejs";
 
 type WorkflowId =
-  | "mouvements"
-  | "redevables"
-  | "bacs"
-  | "pav"
-  | "zero_depot"
-  | "zero_levee"
-  | "sans_dotation"
-  | "evenements";
+    | "mouvements"
+    | "redevables"
+    | "bacs"
+    | "convention"
+    | "pav"
+    | "zero_depot"
+    | "zero_levee"
+    | "sans_dotation"
+    | "evenements";
 
-/** Compteurs KPI accumulés en mémoire : { NOM_KPI: valeur } */
 type Counters = Record<string, number>;
 
 type WorkflowOutcome = {
@@ -42,21 +40,33 @@ function firstSheet(workbook: XLSX.WorkBook): XLSX.WorkSheet {
   return workbook.Sheets[workbook.SheetNames[0]];
 }
 
-/** Valide le format "AAAA-MM" envoyé par le champ `<input type="month">`. */
-function isValidTargetMonth(value: unknown): value is string {
-  return typeof value === "string" && /^\d{4}-\d{2}$/.test(value.trim());
+// Convertit une date Excel (numéro de série) ou chaîne en objet Date JS
+function parseExcelDate(value: unknown): Date | null {
+  if (value instanceof Date) return value;
+  if (typeof value === "number") {
+    const utc_days = Math.floor(value - 25569);
+    const utc_value = utc_days * 86400;
+    return new Date(utc_value * 1000);
+  }
+  if (typeof value === "string") {
+    const parsed = new Date(value);
+    return isNaN(parsed.getTime()) ? null : parsed;
+  }
+  return null;
+}
+
+// Fonction de nettoyage pour les exclusions demandées
+function isExcludedClient(usagerModele: string): boolean {
+  const upper = usagerModele.toUpperCase();
+  return upper.includes("SMIDOM") || upper.includes("BAC DE REGROUPEMENT");
 }
 
 /* =========================================================================
  * MODULE RI — Stratégie "agrégation à la volée"
- * Chaque workflow lit le fichier ligne par ligne, incrémente des compteurs
- * en mémoire, et ne renvoie QUE ces compteurs finaux (aucune ligne brute
- * n'est jamais insérée en base).
  * ======================================================================= */
 
 /* -----------------------------------------------------------------------
- * Workflow "mouvements" — balance arrivées et départ
- * SENS === 'ARRIVEE' -> ARRIVEES_CLIENTS | SENS === 'DEPART' -> DEPARTS_CLIENTS
+ * Workflow "mouvements" — balance arrivées et départ (Annuel)
  * --------------------------------------------------------------------- */
 function computeMouvements(workbook: XLSX.WorkBook): WorkflowOutcome {
   const sheet = firstSheet(workbook);
@@ -74,8 +84,7 @@ function computeMouvements(workbook: XLSX.WorkBook): WorkflowOutcome {
 }
 
 /* -----------------------------------------------------------------------
- * Workflow "redevables" — liste redevables
- * CLIENT MODELE inclut 'PARTICULIER' / 'PROFESSIONNEL' / 'ADMINISTRATION'
+ * Workflow "redevables" — liste redevables (Global / Instant T)
  * --------------------------------------------------------------------- */
 function computeRedevables(workbook: XLSX.WorkBook): WorkflowOutcome {
   const sheet = firstSheet(workbook);
@@ -84,45 +93,82 @@ function computeRedevables(workbook: XLSX.WorkBook): WorkflowOutcome {
   const counters: Counters = { REDEVABLES_PART: 0, REDEVABLES_PRO: 0, REDEVABLES_ADMIN: 0 };
 
   for (const row of rows) {
-    const modele = typeof row["CLIENT MODELE"] === "string" ? row["CLIENT MODELE"].trim().toUpperCase() : "";
-    if (!modele) continue;
+    const modele = typeof row["CLIENT_MODELE"] === "string" ? row["CLIENT_MODELE"] : (row["CLIENT MODELE"] as string || "");
+    const modeleStr = modele.trim().toUpperCase();
 
-    // Indépendants (pas de else-if) : un même libellé pourrait en théorie
-    // relever de plusieurs catégories selon les évolutions du référentiel.
-    if (modele.includes("PARTICULIER")) counters.REDEVABLES_PART++;
-    if (modele.includes("PROFESSIONNEL")) counters.REDEVABLES_PRO++;
-    if (modele.includes("ADMINISTRATION")) counters.REDEVABLES_ADMIN++;
+    if (!modeleStr || isExcludedClient(modeleStr)) continue;
+
+    if (modeleStr.includes("PARTICULIER")) counters.REDEVABLES_PART++;
+    if (modeleStr.includes("PROFESSIONNEL")) counters.REDEVABLES_PRO++;
+    if (modeleStr.includes("ADMINISTRATION")) counters.REDEVABLES_ADMIN++;
   }
 
   return { counters, totalRows: rows.length };
 }
 
 /* -----------------------------------------------------------------------
- * Workflow "bacs" — liste clients avec bac et bac convention
- * CONTENANT TYPE inclut 'CONVENTION' > 'SAC' > (non vide) 'BAC'
+ * Workflow "bacs" — liste clients avec bac (Global / Instant T)
  * --------------------------------------------------------------------- */
 function computeBacs(workbook: XLSX.WorkBook): WorkflowOutcome {
   const sheet = firstSheet(workbook);
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
 
-  const counters: Counters = { CLIENTS_CONVENTION: 0, CLIENTS_SAC: 0, CLIENTS_BAC: 0 };
+  const counters: Counters = { CLIENTS_SAC: 0, CLIENTS_BAC: 0 };
 
   for (const row of rows) {
-    const raw = row["CONTENANT TYPE"];
-    const type = typeof raw === "string" ? raw.trim().toUpperCase() : "";
-    if (!type) continue; // cellule vide -> pas de contenant, on ignore
+    const modele = String(row["USAGER MODELE"] || row["CLIENT_MODELE"] || "").toUpperCase();
+    if (isExcludedClient(modele)) continue;
 
-    if (type.includes("CONVENTION")) counters.CLIENTS_CONVENTION++;
-    else if (type.includes("SAC")) counters.CLIENTS_SAC++;
-    else counters.CLIENTS_BAC++;
+    const type = String(row["CONTENANT TYPE"] || "").trim().toUpperCase();
+    if (!type) continue;
+
+    if (type === "SAC") {
+      counters.CLIENTS_SAC++;
+    } else if (!type.includes("CONVENTION")) {
+      // Si ce n'est ni SAC ni CONVENTION, c'est un BAC
+      counters.CLIENTS_BAC++;
+    }
   }
 
   return { counters, totalRows: rows.length };
 }
 
 /* -----------------------------------------------------------------------
- * Workflow "pav" — liste déposants et supports
- * SUPPORT MODELE inclut 'PAV' -> CLIENTS_PAV
+ * Workflow "convention" — clients convention (Trimestriel)
+ * Filtre sur la date de dotation
+ * --------------------------------------------------------------------- */
+function computeConvention(workbook: XLSX.WorkBook, periodeReference: string): WorkflowOutcome {
+  const sheet = firstSheet(workbook);
+  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
+
+  const counters: Counters = { CLIENTS_CONVENTION: 0 };
+
+  // periodeReference ressemble à "2026-T1"
+  const [yearStr, quarterStr] = periodeReference.split("-");
+  const targetYear = parseInt(yearStr, 10);
+  const targetQuarter = parseInt(quarterStr.replace("T", ""), 10);
+
+  for (const row of rows) {
+    const type = String(row["CONTENANT TYPE"] || "").trim().toUpperCase();
+    if (!type.includes("CONVENTION")) continue;
+
+    const dateDotation = parseExcelDate(row["DATE DOTATION"]);
+    if (!dateDotation) continue;
+
+    const dotYear = dateDotation.getFullYear();
+    // getMonth() est 0-indexé, on ajoute 1 pour faire le calcul
+    const dotQuarter = Math.ceil((dateDotation.getMonth() + 1) / 3);
+
+    if (dotYear === targetYear && dotQuarter === targetQuarter) {
+      counters.CLIENTS_CONVENTION++;
+    }
+  }
+
+  return { counters, totalRows: rows.length };
+}
+
+/* -----------------------------------------------------------------------
+ * Workflow "pav" — liste déposants et supports (Global / Instant T)
  * --------------------------------------------------------------------- */
 function computePav(workbook: XLSX.WorkBook): WorkflowOutcome {
   const sheet = firstSheet(workbook);
@@ -131,17 +177,22 @@ function computePav(workbook: XLSX.WorkBook): WorkflowOutcome {
   const counters: Counters = { CLIENTS_PAV: 0 };
 
   for (const row of rows) {
-    const raw = row["SUPPORT MODELE"];
-    const modele = typeof raw === "string" ? raw.trim().toUpperCase() : "";
-    if (modele.includes("PAV")) counters.CLIENTS_PAV++;
+    const modele = String(row["USAGER MODELE"] || "").toUpperCase();
+    if (isExcludedClient(modele)) continue;
+
+    const actif = String(row["CLIENT ACTIF"] || "").toUpperCase();
+    const avecSupport = toNumber(row["AVEC SUPPORT"]);
+
+    if (actif === "O" && avecSupport === 1) {
+      counters.CLIENTS_PAV++;
+    }
   }
 
   return { counters, totalRows: rows.length };
 }
 
 /* -----------------------------------------------------------------------
- * Workflow "sans_dotation" — liste clients actifs sans support et sans bac
- * ACTIF === 'O' -> CLIENTS_SANS_DOTATION
+ * Workflow "sans_dotation" — liste clients actifs sans support (Trimestriel)
  * --------------------------------------------------------------------- */
 function computeSansDotation(workbook: XLSX.WorkBook): WorkflowOutcome {
   const sheet = firstSheet(workbook);
@@ -150,7 +201,7 @@ function computeSansDotation(workbook: XLSX.WorkBook): WorkflowOutcome {
   const counters: Counters = { CLIENTS_SANS_DOTATION: 0 };
 
   for (const row of rows) {
-    const actif = typeof row["ACTIF"] === "string" ? row["ACTIF"].trim() : row["ACTIF"];
+    const actif = String(row["CLIENT ACTIF"] || row["ACTIF"] || "").toUpperCase();
     if (actif === "O") counters.CLIENTS_SANS_DOTATION++;
   }
 
@@ -158,8 +209,7 @@ function computeSansDotation(workbook: XLSX.WorkBook): WorkflowOutcome {
 }
 
 /* -----------------------------------------------------------------------
- * Workflow "zero_depot" — liste déposants avec 0 dépôt
- * ACTIF === 'O' -> ANOMALIE_0_DEPOT
+ * Workflow "zero_depot" — déposants avec 0 dépôt (Trimestriel)
  * --------------------------------------------------------------------- */
 function computeZeroDepot(workbook: XLSX.WorkBook): WorkflowOutcome {
   const sheet = firstSheet(workbook);
@@ -168,22 +218,23 @@ function computeZeroDepot(workbook: XLSX.WorkBook): WorkflowOutcome {
   const counters: Counters = { ANOMALIE_0_DEPOT: 0 };
 
   for (const row of rows) {
-    const actif = typeof row["ACTIF"] === "string" ? row["ACTIF"].trim() : row["ACTIF"];
-    if (actif === "O") counters.ANOMALIE_0_DEPOT++;
+    const modele = String(row["USAGER MODELE"] || row["MODELE"] || "").toUpperCase();
+    if (isExcludedClient(modele)) continue;
+
+    const actif = String(row["CLIENT ACTIF"] || row["ACTIF"] || "").toUpperCase();
+    const visite = toNumber(row["VISITE COLONNES"] ?? row["VISITES"]);
+
+    if (actif === "O" && visite === 0) {
+      counters.ANOMALIE_0_DEPOT++;
+    }
   }
 
   return { counters, totalRows: rows.length };
 }
 
 /* -----------------------------------------------------------------------
- * Workflow "zero_levee" — liste clients avec bac sans collecte
- * ⚠️ Fichier = Tableau Croisé Dynamique (TCD), pas une liste plate.
- * On lit chaque feuille en mode `header: 1` et on cherche la ligne dont
- * une cellule contient "Total général" ; la valeur se trouve dans la
- * cellule adjacente sur la même ligne. On parcourt toutes les feuilles du
- * classeur (le TCD n'est pas toujours sur le même onglet ni le même nom
- * selon l'export) et on s'arrête dès que la ligne est trouvée.
- * -> ANOMALIE_0_LEVEE
+ * Workflow "zero_levee" — liste clients sans collecte (Trimestriel)
+ * ⚠️ Fichier = TCD.
  * --------------------------------------------------------------------- */
 function computeZeroLevee(workbook: XLSX.WorkBook): WorkflowOutcome {
   const counters: Counters = { ANOMALIE_0_LEVEE: 0 };
@@ -198,11 +249,10 @@ function computeZeroLevee(workbook: XLSX.WorkBook): WorkflowOutcome {
 
     for (const row of matrix) {
       const idx = row.findIndex(
-        (cell) => typeof cell === "string" && cell.trim().toLowerCase().includes("total général")
+          (cell) => typeof cell === "string" && cell.trim().toLowerCase().includes("total général")
       );
       if (idx === -1) continue;
 
-      // La valeur est dans la cellule adjacente, sur la même ligne.
       const raw = row[idx + 1];
       const valeur = toNumber(raw);
       counters.ANOMALIE_0_LEVEE = Number.isNaN(valeur) ? 0 : valeur;
@@ -219,34 +269,46 @@ function computeZeroLevee(workbook: XLSX.WorkBook): WorkflowOutcome {
 }
 
 /* -----------------------------------------------------------------------
- * Workflow "evenements" — liste événements en cours
- * Statut (insensible casse) === 'en cours' -> DOSSIERS_EN_COURS
+ * Workflow "evenements" — liste événements en cours (Trimestriel)
  * --------------------------------------------------------------------- */
-function computeEvenements(workbook: XLSX.WorkBook): WorkflowOutcome {
+function computeEvenements(workbook: XLSX.WorkBook, periodeReference: string): WorkflowOutcome {
   const sheet = firstSheet(workbook);
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
 
   const counters: Counters = { DOSSIERS_EN_COURS: 0 };
 
+  // Filtrage selon le trimestre de la date de début de l'événement
+  const [yearStr, quarterStr] = periodeReference.split("-");
+  const targetYear = parseInt(yearStr, 10);
+  const targetQuarter = parseInt(quarterStr.replace("T", ""), 10);
+
   for (const row of rows) {
-    const statut = typeof row["Statut"] === "string" ? row["Statut"].trim().toLowerCase() : "";
-    if (statut === "en cours") counters.DOSSIERS_EN_COURS++;
+    const dateDebut = parseExcelDate(row["Date de début"] || row["DATE DEBUT"]);
+    if (!dateDebut) continue;
+
+    const eventYear = dateDebut.getFullYear();
+    const eventQuarter = Math.ceil((dateDebut.getMonth() + 1) / 3);
+
+    // Si on veut être strict sur l'appartenance au trimestre :
+    if (eventYear === targetYear && eventQuarter === targetQuarter) {
+      counters.DOSSIERS_EN_COURS++;
+    }
   }
 
   return { counters, totalRows: rows.length };
 }
 
 /* -----------------------------------------------------------------------
- * Upsert générique : 1 KPI = 1 ligne (moisReference, indicateur) unique
+ * Upsert générique
  * --------------------------------------------------------------------- */
-async function upsertIndicateurs(moisReference: string, counters: Counters): Promise<string[]> {
+async function upsertIndicateurs(periodeReference: string, counters: Counters): Promise<string[]> {
   const details: string[] = [];
 
   for (const [indicateur, valeur] of Object.entries(counters)) {
     await prisma.riIndicateur.upsert({
-      where: { moisReference_indicateur: { moisReference, indicateur } },
+      where: { periodeReference_indicateur: { periodeReference, indicateur } },
       update: { valeur },
-      create: { moisReference, indicateur, valeur },
+      create: { periodeReference, indicateur, valeur },
     });
     details.push(`${indicateur} : ${valeur}`);
   }
@@ -264,7 +326,7 @@ export async function POST(req: NextRequest) {
     const formData = await req.formData();
     const file = formData.get("file");
     workflow = formData.get("workflow") as string | null;
-    const targetMonth = formData.get("targetMonth");
+    const periodeReferenceRaw = formData.get("periodeReference") as string | null;
 
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "Aucun fichier reçu." }, { status: 400 });
@@ -272,13 +334,14 @@ export async function POST(req: NextRequest) {
     if (!workflow) {
       return NextResponse.json({ error: "Aucun workflow sélectionné." }, { status: 400 });
     }
-    if (!isValidTargetMonth(targetMonth)) {
+    if (!periodeReferenceRaw) {
       return NextResponse.json(
-        { error: "Le mois de référence (targetMonth, format AAAA-MM) est obligatoire pour le module RI." },
-        { status: 400 }
+          { error: "La période de référence est obligatoire pour le module RI." },
+          { status: 400 }
       );
     }
-    const moisReference = targetMonth.trim();
+
+    const periodeReference = periodeReferenceRaw.trim();
 
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
@@ -288,8 +351,8 @@ export async function POST(req: NextRequest) {
       workbook = XLSX.read(buffer, { type: "buffer", cellDates: true });
     } catch {
       return NextResponse.json(
-        { error: "Fichier illisible : vérifiez qu'il s'agit bien d'un classeur Excel (.xlsx/.xls)." },
-        { status: 400 }
+          { error: "Fichier illisible : vérifiez qu'il s'agit bien d'un classeur Excel (.xlsx/.xls)." },
+          { status: 400 }
       );
     }
 
@@ -309,6 +372,9 @@ export async function POST(req: NextRequest) {
       case "bacs":
         outcome = computeBacs(workbook);
         break;
+      case "convention":
+        outcome = computeConvention(workbook, periodeReference);
+        break;
       case "pav":
         outcome = computePav(workbook);
         break;
@@ -322,21 +388,19 @@ export async function POST(req: NextRequest) {
         outcome = computeZeroLevee(workbook);
         break;
       case "evenements":
-        outcome = computeEvenements(workbook);
+        outcome = computeEvenements(workbook, periodeReference);
         break;
       default:
         return NextResponse.json({ error: `Workflow inconnu : "${workflow}".` }, { status: 400 });
     }
 
-    // Agrégation à la volée : seuls les compteurs finaux sont persistés,
-    // jamais les lignes brutes du fichier source.
-    const details = await upsertIndicateurs(moisReference, outcome.counters);
+    const details = await upsertIndicateurs(periodeReference, outcome.counters);
 
     return NextResponse.json({
       success: true,
       workflow,
       fileName: file.name,
-      targetMonth: moisReference,
+      periodeReference: periodeReference,
       rowsScanned: outcome.totalRows,
       details,
       ...(outcome.note ? { warning: outcome.note } : {}),
@@ -344,13 +408,13 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error(`[api/upload-ri] Échec du traitement (workflow="${workflow}") :`, err);
     return NextResponse.json(
-      {
-        error:
-          err instanceof Error
-            ? err.message
-            : "Erreur interne lors du traitement du fichier.",
-      },
-      { status: 500 }
+        {
+          error:
+              err instanceof Error
+                  ? err.message
+                  : "Erreur interne lors du traitement du fichier.",
+        },
+        { status: 500 }
     );
   }
 }

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import * as XLSX from "xlsx";
 import { prisma } from "@/lib/prisma";
 import { parseTargetMonth } from "@/lib/targetMonth";
+import {parseExcelDate} from "@/lib/parseExcelDate";
 
 export const runtime = "nodejs";
 
@@ -58,16 +59,24 @@ export async function POST(req: NextRequest) {
             let matchedRows = 0;
 
             for (const row of rows) {
+                const datePesee = parseExcelDate(row["Date de la pesée"]) ?? monthInfo?.refDate ?? null;
                 const lieux = String(row["Lieux d'exploitation"] || "").toLowerCase();
-                const transporteur = String(row["Transporteur"] || "").toLowerCase();
-                const client = String(row["Nom du client"] || "").toLowerCase();
 
-                // Filtre strict : on ne garde que le SMIDOM
-                if (lieux.includes("smidom") || transporteur.includes("smidom") || client.includes("smidom")) {
+                // NOUVEAU FILTRE : On ne garde QUE les lignes où "Lieux d'exploitation" contient SMIDOM
+                if (lieux.includes("smidom")) {
                     const tonnes = toNumber(row["Poids réalisé"]);
                     if (!Number.isNaN(tonnes)) {
                         totalTonnes += tonnes;
                         matchedRows++;
+                    }
+                }
+
+                if (monthInfo?.refDate) {
+                    const isSameMonth = datePesee.getMonth() === monthInfo.refDate.getMonth();
+                    const isSameYear = datePesee.getFullYear() === monthInfo.refDate.getFullYear();
+
+                    if (!isSameMonth || !isSameYear) {
+                        continue; // On ignore les lignes qui ne sont pas du bon mois/année
                     }
                 }
             }
@@ -85,14 +94,24 @@ export async function POST(req: NextRequest) {
             let matchedRows = 0;
 
             for (const row of rows) {
-                const libelle = String(row["Libellé Client"] || "").toLowerCase();
-                const code = String(row["Code Client"] || "").toLowerCase();
+                const datePoidsEntree = parseExcelDate(row["Date du poids d'entrée"]) ?? monthInfo?.refDate ?? null;
+                const libelle = String(row["Libellé Client"] || "").toUpperCase().trim();
 
-                if (libelle.includes("smidom") || code.includes("smidom")) {
+                // NOUVEAU FILTRE : On vérifie que la colonne "Libellé Client" inclut le mot exact "SMIDOM"
+                if (libelle.includes("SMIDOM")) {
                     const kg = toNumber(row["Net"]);
                     if (!Number.isNaN(kg)) {
                         totalKg += kg;
                         matchedRows++;
+                    }
+                }
+
+                if (monthInfo?.refDate) {
+                    const isSameMonth = datePoidsEntree.getMonth() === monthInfo.refDate.getMonth();
+                    const isSameYear = datePoidsEntree.getFullYear() === monthInfo.refDate.getFullYear();
+
+                    if (!isSameMonth || !isSameYear) {
+                        continue; // On ignore les lignes qui ne sont pas du bon mois/année
                     }
                 }
             }
@@ -200,14 +219,14 @@ export async function POST(req: NextRequest) {
         for (const [indicateur, valeur] of Object.entries(kpiUpdates)) {
             await prisma.csIndicateur.upsert({
                 where: {
-                    moisReference_indicateur: {
-                        moisReference: targetMonthStr,
+                    periodeReference_indicateur: {
+                        periodeReference: targetMonthStr,
                         indicateur: indicateur,
                     },
                 },
                 update: { valeur },
                 create: {
-                    moisReference: targetMonthStr,
+                    periodeReference: targetMonthStr,
                     indicateur,
                     valeur,
                 },

@@ -69,7 +69,7 @@ type ApiResult = {
     success: boolean;
     workflow: string;
     fileName: string;
-    targetMonth: string;
+    targetMonth: string; // Ce champ est reçu, il sera enregistré en tant que "periodeReference" côté BDD
     rowsScanned: number;
     details: string[];
     warning?: string;
@@ -114,6 +114,7 @@ export default function CsUploadPage() {
         const formData = new FormData();
         formData.append("file", fileRef.current);
         formData.append("workflow", workflowId);
+        // On envoie toujours le mois sélectionné, le backend le mappera sur `periodeReference`
         formData.append("targetMonth", targetMonth);
 
         try {
@@ -161,7 +162,7 @@ export default function CsUploadPage() {
                 <div className="bg-white rounded-2xl border border-[#E1E8E6] shadow-[0_8px_24px_-8px_rgba(15,42,61,0.08)] p-8">
                     <h1 className="text-[#0F2A3D] text-2xl font-extrabold mb-1">Importer un fichier mensuel</h1>
                     <p className="text-[#52677A] text-sm mb-7">
-                        Chaque fichier est agrégé à la volée : seuls les compteurs (KPIs) calculés sont enregistrés, jamais les lignes brutes.
+                        Chaque fichier est agrégé à la volée : seuls les compteurs (KPIs) calculés sont enregistrés en base de données.
                     </p>
 
                     <div className="mb-7">
@@ -207,7 +208,7 @@ export default function CsUploadPage() {
 
                     <div className="mb-7">
                         <p className="text-[#0F2A3D] text-xs uppercase tracking-wide font-bold mb-3">
-                            2. Mois de référence
+                            2. Période de référence (Mois)
                         </p>
                         <div className="relative">
                             <CalendarDays className="w-4 h-4 text-[#52677A] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -220,7 +221,7 @@ export default function CsUploadPage() {
                             />
                         </div>
                         <p className="text-[11px] text-[#8AA0AA] mt-1.5">
-                            Les KPIs calculés sont rattachés à ce mois (upsert).
+                            Les valeurs seront rattachées à ce mois de référence lors de l'enregistrement.
                         </p>
                     </div>
 

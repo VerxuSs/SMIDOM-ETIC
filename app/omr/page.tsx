@@ -23,7 +23,9 @@ type WorkflowId =
     | "kilometres"
     | "carburant"
     | "biodechets"
-    | "serfim";
+    | "serfim"
+    | "parc_bacs_particuliers"
+    | "parc_cartes_pav";
 
 type WorkflowDef = {
   id: WorkflowId;
@@ -75,6 +77,20 @@ const WORKFLOWS: WorkflowDef[] = [
     description: "Export RSB",
     fileHint: "Bilan_Smidom.xlsx",
     icon: ScaleIcon,
+  },
+  {
+    id: "parc_bacs_particuliers",
+    label: "Parc Bacs Part.",
+    description: "Instantané global",
+    fileHint: "liste clients avec bac...xlsx",
+    icon: ClipboardList,
+  },
+  {
+    id: "parc_cartes_pav",
+    label: "Parc Cartes PAV",
+    description: "Instantané global",
+    fileHint: "liste déposants et supports...xlsx",
+    icon: ClipboardList,
   },
 ];
 
@@ -240,7 +256,7 @@ export default function OmrUploadPage() {
                 />
               </div>
               <p className="text-[11px] text-[#8AA0AA] mt-1.5">
-                Ce mois sert de date par défaut pour les lignes où la date n'est pas renseignée ou mal formatée.
+                Ce mois sert de date par défaut ou de filtre. Il est ignoré pour les imports d'instantanés (Parc Bacs/Cartes).
               </p>
             </div>
 

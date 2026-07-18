@@ -25,18 +25,19 @@ type OmrTab = {
   collectePAV: KpiWindow;
   collecteEntretienPAV: KpiWindow;
   bioDechetsTotal: KpiWindow;
-  activiteParticuliers: {
-    mocked: boolean;
-    nombreLevees: KpiWindow;
-    parcBacs: KpiWindow;
-    moyenneLeveesParBac: KpiWindow;
-  };
+
+  parcBacsParticuliers: KpiWindow;
+  parcCartesPav: KpiWindow;
+
+  transfertSerfim: KpiWindow;
+  totalOmrSytraival: KpiWindow;
 };
 
 type DecheteriesTab = {
   passagesParSite: { site: string; kpi: KpiWindow }[];
   fluxPayantsParMatiere: { matiere: string; kpi: KpiWindow }[];
   egtTotal: KpiWindow;
+  ecoSol: KpiWindow;
 };
 
 type RiTab = {
@@ -62,7 +63,12 @@ type CsTab = {
 type DashboardData = {
   success: boolean;
   month: string;
-  label: { mois: string; year: number; yearN1: number };
+  temporalite: {
+    mois: string;
+    trimestre: string;
+    annee: string;
+    label: string;
+  };
   omr: OmrTab;
   decheteries: DecheteriesTab;
   ri: RiTab;
@@ -132,7 +138,8 @@ export default function DashboardPage() {
   return (
     <div className="min-h-screen w-full bg-[#F4F7F5]">
       {/* Header */}
-      <header className="bg-white border-b border-[#E1E8E6] sticky top-0 z-10">
+      {/* Header */}
+      <header className="bg-white border-b border-[#E1E8E6] sticky top-0 z-10 shadow-sm">
         <div className="max-w-6xl mx-auto px-6 py-4 flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-[#0F2A3D] flex items-center justify-center">
@@ -140,18 +147,38 @@ export default function DashboardPage() {
             </div>
             <div>
               <p className="text-[#0F2A3D] text-base font-extrabold leading-tight">Tableau de bord stratégique</p>
-              <p className="text-[#8AA0AA] text-[11px]">Consolidation Déchets — vue mensuelle</p>
+              <p className="text-[#8AA0AA] text-[11px]">Consolidation Déchets — SMIDOM</p>
             </div>
           </div>
 
-          <div className="relative">
-            <CalendarDays className="w-4 h-4 text-[#52677A] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-            <input
-              type="month"
-              value={month}
-              onChange={(e) => setMonth(e.target.value)}
-              className="rounded-xl border border-[#E1E8E6] bg-[#FAFCFB] pl-10 pr-3.5 py-2 text-sm text-[#0F2A3D] font-semibold focus:outline-none focus:ring-2 focus:ring-[#2E9E6D]/30 focus:border-[#2E9E6D]"
-            />
+          <div className="flex items-center gap-6">
+            {/* Badges dynamiques de temporalité */}
+            {!loading && !error && data && (
+                <div className="hidden md:flex gap-2">
+                <span className="bg-[#EAF3F9] text-[#1D6FA5] text-[11px] font-bold px-2.5 py-1 rounded-lg">
+                  {data.temporalite.mois}
+                </span>
+                  <span className="bg-[#EFF8F3] text-[#2E9E6D] text-[11px] font-bold px-2.5 py-1 rounded-lg">
+                  {/* data.temporalite.trimestre vient de l'API /api/dashboard */}
+                    {data.temporalite?.trimestre}
+                </span>
+                  <span className="bg-[#FBF3E7] text-[#D98E3F] text-[11px] font-bold px-2.5 py-1 rounded-lg">
+                  Année {data.temporalite?.annee.replace('-ANNUEL', '')}
+                </span>
+                </div>
+            )}
+
+            {/* Sélecteur Global Unique */}
+            <div className="relative">
+              <CalendarDays className="w-4 h-4 text-[#52677A] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                  type="month"
+                  value={month}
+                  onChange={(e) => setMonth(e.target.value)}
+                  className="w-40 rounded-xl border border-[#E1E8E6] bg-[#FAFCFB] pl-10 pr-3.5 py-2 text-sm text-[#0F2A3D] font-bold focus:outline-none focus:ring-2 focus:ring-[#2E9E6D]/30 focus:border-[#2E9E6D] cursor-pointer shadow-sm hover:bg-white transition-colors"
+                  title="Sélecteur global (Mois / Trimestre / Année)"
+              />
+            </div>
           </div>
         </div>
 
@@ -161,24 +188,23 @@ export default function DashboardPage() {
             const Icon = tab.icon;
             const selected = activeTab === tab.id;
             return (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setActiveTab(tab.id)}
-                className={[
-                  "flex items-center gap-2 px-4 py-3 text-sm font-semibold border-b-2 whitespace-nowrap transition-colors",
-                  selected ? "border-current text-[#0F2A3D]" : "border-transparent text-[#8AA0AA] hover:text-[#52677A]",
-                ].join(" ")}
-                style={selected ? { color: tab.accent, borderColor: tab.accent } : undefined}
-              >
-                <Icon className="w-4 h-4" />
-                {tab.label}
-              </button>
+                <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setActiveTab(tab.id)}
+                    className={[
+                      "flex items-center gap-2 px-4 py-3 text-sm font-semibold border-b-2 whitespace-nowrap transition-colors",
+                      selected ? "border-current text-[#0F2A3D]" : "border-transparent text-[#8AA0AA] hover:text-[#52677A]",
+                    ].join(" ")}
+                    style={selected ? { color: tab.accent, borderColor: tab.accent } : undefined}
+                >
+                  <Icon className="w-4 h-4" />
+                  {tab.label}
+                </button>
             );
           })}
         </div>
       </header>
-
       <main className="max-w-6xl mx-auto px-6 py-8">
         {loading && (
           <div className="flex items-center justify-center gap-2 text-[#52677A] text-sm py-24">
@@ -218,46 +244,83 @@ export default function DashboardPage() {
  * Onglet OMR
  * ---------------------------------------------------------------------- */
 function OmrPanel({ tab }: { tab: OmrTab }) {
-  return (
-    <div className="space-y-6">
-      <Section title="Collecte">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <DuoChart title="Collecte BOM" unit="T" kpi={tab.collecteBOM} accent="#1D6FA5" />
-          <DuoChart title="Collecte PAV" unit="T" kpi={tab.collectePAV} accent="#2E9E6D" />
-          <DuoChart title="Collecte entretien PAV" unit="T" kpi={tab.collecteEntretienPAV} accent="#D98E3F" />
-          <DuoChart
-            title="Bio-déchets (total)"
-            unit="T"
-            kpi={tab.bioDechetsTotal}
-            accent="#2E9E6D"
-            caption='⚠️ Le schéma ne distingue pas "abri bacs" / "composteurs" — total tous contenants confondus.'
-          />
-        </div>
-      </Section>
+  // Calcul rapide de l'écart (Tonnage OMR Sytraival vs Tonnage Serfim/Organom)
+  // On affiche un écart positif si Sytraival a facturé plus que ce qu'Organom a reçu.
+  const ecartControleMois = (tab.totalOmrSytraival.mois - tab.transfertSerfim.mois);
+  const ecartControleCumul = (tab.totalOmrSytraival.cumul - tab.transfertSerfim.cumul);
 
-      <Section title="Activité particuliers" badge="Données de démonstration">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <StatCard
-            label="Nombre de levées"
-            value={tab.activiteParticuliers.nombreLevees.mois}
-            evolutionPct={tab.activiteParticuliers.nombreLevees.evolMois}
-            accent="blue"
-          />
-          <StatCard
-            label="Parc de bacs"
-            value={tab.activiteParticuliers.parcBacs.mois}
-            evolutionPct={tab.activiteParticuliers.parcBacs.evolMois}
-            accent="green"
-          />
-          <StatCard
-            label="Moyenne levées / bac / mois"
-            value={tab.activiteParticuliers.moyenneLeveesParBac.mois}
-            evolutionPct={tab.activiteParticuliers.moyenneLeveesParBac.evolMois}
-            accent="amber"
-          />
-        </div>
-      </Section>
-    </div>
+  return (
+      <div className="space-y-6">
+        <Section title="Collecte">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <DuoChart title="Collecte BOM" unit="T" kpi={tab.collecteBOM} accent="#1D6FA5" />
+            <DuoChart title="Collecte PAV" unit="T" kpi={tab.collectePAV} accent="#2E9E6D" />
+            <DuoChart title="Collecte entretien PAV" unit="T" kpi={tab.collecteEntretienPAV} accent="#D98E3F" />
+            <DuoChart
+                title="Bio-déchets (total)"
+                unit="T"
+                kpi={tab.bioDechetsTotal}
+                accent="#2E9E6D"
+                caption='Donnée issue du tableau récapitulatif mensuel Ecovalim.'
+            />
+          </div>
+        </Section>
+
+        <Section title="Activité particuliers" badge="Données globales (Instant T)">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <StatCard
+                label="Parc de bacs OMR (Particuliers)"
+                value={tab.parcBacsParticuliers.mois}
+                accent="green"
+                helperText="Mis à jour à chaque import du fichier de dotation."
+            />
+            <StatCard
+                label="Parc de cartes PAV (Particuliers)"
+                value={tab.parcCartesPav.mois}
+                accent="blue"
+                helperText="Mis à jour à chaque import du fichier des déposants."
+            />
+          </div>
+        </Section>
+
+        <Section title="Contrôle Organom (Serfim)">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* On utilise hideEvolution car la donnée Serfim n'a peut-être pas d'historique N-1 */}
+            <DuoChart
+                title="Tonnage Total (Sytraival)"
+                unit="T"
+                kpi={tab.totalOmrSytraival}
+                accent="#1D6FA5"
+                hideEvolution
+            />
+            <DuoChart
+                title="Transfert Organom (Serfim)"
+                unit="T"
+                kpi={tab.transfertSerfim}
+                accent="#D98E3F"
+                hideEvolution
+            />
+
+            <div className="bg-white rounded-2xl border border-[#E1E8E6] p-5 flex flex-col justify-center">
+              <p className="text-[11px] text-[#8AA0AA] uppercase font-bold tracking-wide mb-2">Écart (Sytraival - Organom)</p>
+              <div className="space-y-4">
+                <div>
+                  <p className="text-xs text-[#52677A] font-semibold">Mois en cours :</p>
+                  <p className={`text-2xl font-extrabold ${Math.abs(ecartControleMois) > 10 ? 'text-[#C05B3C]' : 'text-[#2E9E6D]'}`}>
+                    {ecartControleMois > 0 ? "+" : ""}{ecartControleMois.toLocaleString("fr-FR", { maximumFractionDigits: 1 })} T
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-[#52677A] font-semibold">Cumul annuel :</p>
+                  <p className={`text-2xl font-extrabold ${Math.abs(ecartControleCumul) > 50 ? 'text-[#C05B3C]' : 'text-[#2E9E6D]'}`}>
+                    {ecartControleCumul > 0 ? "+" : ""}{ecartControleCumul.toLocaleString("fr-FR", { maximumFractionDigits: 1 })} T
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </Section>
+      </div>
   );
 }
 
@@ -265,55 +328,62 @@ function OmrPanel({ tab }: { tab: OmrTab }) {
  * Onglet Déchèteries
  * ---------------------------------------------------------------------- */
 function DecheteriesPanel({
-  tab,
-  selectedMatiere,
-  setSelectedMatiere,
-  selectedFluxPayant,
-}: {
+                            tab,
+                            selectedMatiere,
+                            setSelectedMatiere,
+                            selectedFluxPayant,
+                          }: {
   tab: DecheteriesTab;
   selectedMatiere: string | null;
   setSelectedMatiere: (m: string) => void;
   selectedFluxPayant: { matiere: string; kpi: KpiWindow } | null;
 }) {
   return (
-    <div className="space-y-6">
-      <Section title="Passages par site">
-        <MultiCategoryDuoChart
-          title="Passages en déchèterie"
-          unit="passages"
-          items={tab.passagesParSite.map((p) => ({ label: p.site, kpi: p.kpi }))}
-        />
-      </Section>
+      <div className="space-y-6">
+        <Section title="Passages par site (Mensuel)">
+          <MultiCategoryDuoChart
+              title="Passages en déchèterie"
+              unit="passages"
+              items={tab.passagesParSite.map((p) => ({ label: p.site, kpi: p.kpi }))}
+          />
+        </Section>
 
-      <Section title="Flux payants">
-        <div className="bg-white rounded-2xl border border-[#E1E8E6] p-5 mb-4">
-          <label className="text-[11px] text-[#8AA0AA] uppercase font-bold tracking-wide mb-2 block">
-            Matière
-          </label>
-          <select
-            value={selectedMatiere ?? ""}
-            onChange={(e) => setSelectedMatiere(e.target.value)}
-            className="w-full sm:w-72 rounded-xl border border-[#E1E8E6] bg-[#FAFCFB] px-3.5 py-2.5 text-sm text-[#0F2A3D] font-semibold focus:outline-none focus:ring-2 focus:ring-[#2E9E6D]/30 focus:border-[#2E9E6D]"
-          >
-            {tab.fluxPayantsParMatiere.map((m) => (
-              <option key={m.matiere} value={m.matiere}>
-                {m.matiere}
-              </option>
-            ))}
-          </select>
-        </div>
+        <Section title="Flux payants EGT & Chimirec (Mensuel)">
+          <div className="bg-white rounded-2xl border border-[#E1E8E6] p-5 mb-4">
+            <label className="text-[11px] text-[#8AA0AA] uppercase font-bold tracking-wide mb-2 block">
+              Matière
+            </label>
+            <select
+                value={selectedMatiere ?? ""}
+                onChange={(e) => setSelectedMatiere(e.target.value)}
+                className="w-full sm:w-72 rounded-xl border border-[#E1E8E6] bg-[#FAFCFB] px-3.5 py-2.5 text-sm text-[#0F2A3D] font-semibold focus:outline-none focus:ring-2 focus:ring-[#2E9E6D]/30 focus:border-[#2E9E6D]"
+            >
+              {tab.fluxPayantsParMatiere.map((m) => (
+                  <option key={m.matiere} value={m.matiere}>
+                    {m.matiere}
+                  </option>
+              ))}
+            </select>
+          </div>
 
-        {selectedFluxPayant ? (
-          <DuoChart title={selectedFluxPayant.matiere} unit="T" kpi={selectedFluxPayant.kpi} accent="#D98E3F" />
-        ) : (
-          <EmptyState text="Aucune matière en flux payant sur cette période." />
-        )}
-      </Section>
+          {selectedFluxPayant ? (
+              <DuoChart title={selectedFluxPayant.matiere} unit="T" kpi={selectedFluxPayant.kpi} accent="#D98E3F" />
+          ) : (
+              <EmptyState text="Aucune matière en flux payant sur cette période." />
+          )}
+        </Section>
 
-      <Section title="Contrôle EGT">
-        <DuoChart title="Tonnage total EGT (tous flux)" unit="T" kpi={tab.egtTotal} accent="#1D6FA5" />
-      </Section>
-    </div>
+        <Section title="Contrôles Globaux">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <DuoChart title="Tonnage total EGT (Mensuel)" unit="T" kpi={tab.egtTotal} accent="#1D6FA5" />
+
+            {/* Nouveau graphique Trimestriel pour Eco'Sol */}
+            {tab.ecoSol && (
+                <DuoChart title="Détournement Eco'Sol (Trimestriel)" unit="T" kpi={tab.ecoSol} accent="#2E9E6D" />
+            )}
+          </div>
+        </Section>
+      </div>
   );
 }
 
@@ -322,40 +392,52 @@ function DecheteriesPanel({
  * ---------------------------------------------------------------------- */
 function RiPanel({ tab }: { tab: RiTab }) {
   return (
-    <div className="space-y-6">
-      <Section title="Mouvements clients">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <DuoChart title="Arrivées clients" unit="clients" kpi={tab.mouvements.arrivees} accent="#2E9E6D" />
-          <DuoChart title="Départs clients" unit="clients" kpi={tab.mouvements.departs} accent="#C05B3C" />
-        </div>
-      </Section>
+      <div className="space-y-6">
+        <Section title="Mouvements clients (Année en cours)">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <DuoChart title="Arrivées clients" unit="clients" kpi={tab.mouvements.arrivees} accent="#2E9E6D" hideEvolution={true} />
+            <DuoChart title="Départs clients" unit="clients" kpi={tab.mouvements.departs} accent="#C05B3C" hideEvolution={true} />
+          </div>
+        </Section>
 
-      <Section title="Typologie des redevables" badge="Photo à l'instant — pas de cumul">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <DuoChart title="Particuliers" unit="clients" kpi={tab.typologie.particulier} accent="#1D6FA5" hideEvolution={false} />
-          <DuoChart title="Professionnels" unit="clients" kpi={tab.typologie.professionnel} accent="#2E9E6D" />
-          <DuoChart title="Administrations" unit="clients" kpi={tab.typologie.administration} accent="#D98E3F" />
-        </div>
-      </Section>
+        <Section title="Typologie des redevables" badge="Données Globales (Instant T)">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <StatCard label="Particuliers" value={tab.typologie.particulier.mois} accent="blue" />
+            <StatCard label="Professionnels" value={tab.typologie.professionnel.mois} accent="green" />
+            <StatCard label="Administrations" value={tab.typologie.administration.mois} accent="amber" />
+          </div>
+        </Section>
 
-      <Section title="Parc de dotation" badge="Photo à l'instant — pas de cumul">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <DuoChart title="Bacs" unit="clients" kpi={tab.parc.bac} accent="#1D6FA5" />
-          <DuoChart title="Sacs" unit="clients" kpi={tab.parc.sac} accent="#2E9E6D" />
-          <DuoChart title="Convention" unit="clients" kpi={tab.parc.convention} accent="#D98E3F" />
-          <DuoChart title="PAV" unit="clients" kpi={tab.parc.pav} accent="#1D6FA5" />
-        </div>
-      </Section>
+        <Section title="Parc de dotation">
+          {/* Les dotations classiques sont des snapshots globaux */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+            <StatCard label="Parc Bacs" value={tab.parc.bac.mois} accent="blue" />
+            <StatCard label="Parc Sacs" value={tab.parc.sac.mois} accent="green" />
+            <StatCard label="Parc PAV" value={tab.parc.pav.mois} accent="blue" />
+          </div>
+          {/* La convention est trimestrielle, donc graphique en barres ! */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <DuoChart
+                title="Clients Convention (Trimestriel)"
+                unit="clients"
+                kpi={tab.parc.convention}
+                accent="#D98E3F"
+                hideEvolution={true}
+                caption="Filtre appliqué sur la date de dotation au trimestre."
+            />
+          </div>
+        </Section>
 
-      <Section title="Anomalies">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <AlertCard label="0 levée" kpi={tab.anomalies.zeroLevee} />
-          <AlertCard label="0 dépôt" kpi={tab.anomalies.zeroDepot} />
-          <AlertCard label="Sans dotation" kpi={tab.anomalies.sansDotation} />
-          <AlertCard label="Dossiers en cours" kpi={tab.anomalies.dossiersEnCours} />
-        </div>
-      </Section>
-    </div>
+        <Section title="Anomalies & Événements (Trimestriel)">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Passage en graphe avec barres (rouge) pour respecter la temporalité trimestrielle */}
+            <DuoChart title="Anomalies 0 levée" unit="clients" kpi={tab.anomalies.zeroLevee} accent="#C05B3C" hideEvolution={true} />
+            <DuoChart title="Anomalies 0 dépôt" unit="clients" kpi={tab.anomalies.zeroDepot} accent="#C05B3C" hideEvolution={true} />
+            <DuoChart title="Sans dotation" unit="clients" kpi={tab.anomalies.sansDotation} accent="#C05B3C" hideEvolution={true} />
+            <DuoChart title="Dossiers en cours" unit="dossiers" kpi={tab.anomalies.dossiersEnCours} accent="#C05B3C" hideEvolution={true} />
+          </div>
+        </Section>
+      </div>
   );
 }
 

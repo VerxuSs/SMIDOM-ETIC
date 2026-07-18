@@ -32,9 +32,6 @@ model Pesee {
 }
 
 /// Suivi véhicule : kilométrage et carburant (imports "Kilomètres" et "Carburant")
-/// Les deux imports alimentent la même table mais sur des lignes distinctes :
-/// - "Kilomètres"  -> distanceKm renseigné,  litresCarburant = null
-/// - "Carburant"   -> litresCarburant renseigné, distanceKm = null
 model SuiviVehicule {
   id              Int      @id @default(autoincrement())
   date            DateTime
@@ -47,44 +44,31 @@ model SuiviVehicule {
   @@map("suivi_vehicules")
 }
 
-/// Bio-déchets dépivotés (import "Bio-déchets Ecovalim")
-model BioDechet {
-  id       Int      @id @default(autoincrement())
-  date     DateTime
-  idBac    String
-  poidsKg  Float
-
-  @@index([date])
-  @@index([idBac])
-  @@map("bio_dechets")
-}
-
 /* ---------------------------------------------------------------------
    Module Déchèteries
 --------------------------------------------------------------------- */
 
-/// Passages en déchèterie (import "Passages")
 model DechetteriePassage {
-  id          String   @id @default(cuid())
-  datePassage DateTime
-  site        String
-  typeUsager  String?
+  id                String   @id @default(cuid())
+  datePassage       DateTime
+  site              String
+  typeUsager        String?
+  periodeReference  String
 
   @@index([datePassage])
   @@index([site])
   @@map("dechetterie_passages")
 }
 
-/// Flux de déchèterie tous prestataires confondus (imports "Flux EGT",
-/// "D3E", "Piles", "Chimirec", "EcoDDS", "Eco'Sol")
 model DechetterieFlux {
-  id            String   @id @default(cuid())
-  dateCollecte  DateTime
-  site          String
-  categorieFlux String // Valeurs : "PAYANT" ou "REP"
-  prestataire   String
-  matiere       String
-  poidsTonnes   Float // Règle d'or : Toujours en tonnes !
+  id                String   @id @default(cuid())
+  dateCollecte      DateTime
+  periodeReference  String
+  site              String
+  categorieFlux     String // Valeurs : "PAYANT" ou "REP"
+  prestataire       String
+  matiere           String
+  poidsTonnes       Float
 
   @@index([dateCollecte])
   @@index([site])
@@ -93,35 +77,39 @@ model DechetterieFlux {
 }
 
 /* ---------------------------------------------------------------------
-   Module RI (Redevance Incitative)
+   Tables d'Indicateurs (Agrégations KPI)
+   Format de periodeReference : "2026-05", "2026-T1", "2026-ANNUEL", "GLOBALE"
 --------------------------------------------------------------------- */
 
-/// KPIs mensuels du module RI — une seule ligne par (mois, indicateur).
-/// Alimentée par agrégation à la volée : les fichiers sources (jusqu'à
-/// 30 000 lignes) ne sont jamais stockés tels quels, seuls les compteurs
-/// calculés en mémoire sont persistés.
-model RiIndicateur {
-  id            String @id @default(cuid())
-  moisReference String // Format "AAAA-MM" (envoyé par le front)
-  indicateur    String // Nom du KPI (ex: "ARRIVEES_CLIENTS")
-  valeur        Int
+/// KPIs du module OMR (ex: Total Bio-déchets mensuel, Parc Bacs OMR global)
+model OmrIndicateur {
+  id               String @id @default(cuid())
+  periodeReference String
+  indicateur       String // ex: "TOTAL_BIODECHETS", "PARC_BACS_PARTICULIERS"
+  valeur           Float
 
-  @@unique([moisReference, indicateur]) // Upsert : 1 seule valeur par KPI et par mois !
+  @@unique([periodeReference, indicateur])
+  @@map("omr_indicateurs")
+}
+
+/// KPIs du module RI
+model RiIndicateur {
+  id               String @id @default(cuid())
+  periodeReference String
+  indicateur       String
+  valeur           Int    // Entier car ce sont des nombres de clients/mouvements
+
+  @@unique([periodeReference, indicateur])
   @@map("ri_indicateurs")
 }
 
-/* ---------------------------------------------------------------------
-   Module Collecte Sélective (CS)
---------------------------------------------------------------------- */
-
-/// KPIs mensuels du module Collecte Sélective.
-/// Alimentée par agrégation à la volée.
+/// KPIs du module Collecte Sélective
 model CsIndicateur {
-  id            String @id @default(cuid())
-  moisReference String // Format "AAAA-MM"
-  indicateur    String // Nom du KPI (ex: "EMBALLAGES_REGIE")
-  valeur        Float
+  id               String @id @default(cuid())
+  periodeReference String
+  indicateur       String
+  valeur           Float  // Float car ce sont des tonnages ou carburant
 
-  @@unique([moisReference, indicateur]) // Upsert : 1 seule valeur par KPI et par mois !
+  @@unique([periodeReference, indicateur])
   @@map("cs_indicateurs")
 }
