@@ -21,13 +21,19 @@ export type DateRange = { start: Date; end: Date };
 export type FourWindows = {
   mois: DateRange;
   cumul: DateRange;
+
+  // ⚠️ ATTENTION : Suite au changement de règle métier, "moisN1" contient désormais
+  // les données du MOIS PRÉCÉDENT (M-1) et non plus de l'année précédente.
+  // Le nom de la variable est conservé pour la rétrocompatibilité avec le reste du code.
   moisN1: DateRange;
+
+  // Le cumulN1, lui, reste sur l'année précédente (Year-To-Date N-1)
   cumulN1: DateRange;
 
   /** Pour les tables pré-agrégées (RiIndicateur, CsIndicateur, OmrIndicateur) au format mensuel. */
   moisReferenceList: string[];
   cumulReferenceList: string[];
-  moisReferenceN1: string;
+  moisReferenceN1: string; // <-- Contient désormais la chaîne du mois précédent (ex: "2026-04" si mois = "2026-05")
   cumulReferenceN1List: string[];
 
   // NOUVEAUX CHAMPS TEMPORELS POUR LA BDD (champ `periodeReference`) :
@@ -52,40 +58,51 @@ export function computeFourWindows(targetMonth: string): FourWindows {
   const { year, monthIndex } = info;
   const yearN1 = year - 1;
 
-  // Bornes en fin exclusive (`lt`) : le 1er jour du mois suivant, jamais un
-  // "23:59:59" fragile face aux dates stockées en UTC minuit.
+  // 1. Bornes du mois en cours
   const monthStart = new Date(Date.UTC(year, monthIndex, 1));
   const monthEnd = new Date(Date.UTC(year, monthIndex + 1, 1));
 
+  // 2. Bornes du cumul de l'année en cours (YTD)
   const yearStart = new Date(Date.UTC(year, 0, 1));
   const cumulEnd = monthEnd;
 
-  const monthStartN1 = new Date(Date.UTC(yearN1, monthIndex, 1));
-  const monthEndN1 = new Date(Date.UTC(yearN1, monthIndex + 1, 1));
+  // 3. NOUVEAU : Bornes du MOIS PRÉCÉDENT (M-1)
+  // L'objet Date de JavaScript recule automatiquement au mois de décembre de l'année précédente si (monthIndex - 1) < 0
+  const monthStartM1 = new Date(Date.UTC(year, monthIndex - 1, 1));
+  const monthEndM1 = new Date(Date.UTC(year, monthIndex, 1));
 
+  // 4. Bornes du cumul de l'année précédente (YTD N-1)
   const yearStartN1 = new Date(Date.UTC(yearN1, 0, 1));
-  const cumulEndN1 = monthEndN1;
+  const cumulEndN1 = new Date(Date.UTC(yearN1, monthIndex + 1, 1));
 
   // Listes de références mensuelles
   const pad = (n: number) => String(n).padStart(2, "0");
   const moisReferenceList = [`${year}-${pad(monthIndex + 1)}`];
   const cumulReferenceList = Array.from({ length: monthIndex + 1 }, (_, i) => `${year}-${pad(i + 1)}`);
-  const moisReferenceN1 = `${yearN1}-${pad(monthIndex + 1)}`;
+
+  // NOUVEAU : Calcul exact de la chaîne "AAAA-MM" pour le mois précédent
+  let prevYear = year;
+  let prevMonthIndex = monthIndex - 1;
+  if (prevMonthIndex < 0) {
+    prevMonthIndex = 11; // 11 = Décembre
+    prevYear -= 1;
+  }
+  const moisReferenceM1 = `${prevYear}-${pad(prevMonthIndex + 1)}`;
+
   const cumulReferenceN1List = Array.from({ length: monthIndex + 1 }, (_, i) => `${yearN1}-${pad(i + 1)}`);
 
   // Calcul du trimestre (1 à 4)
-  // monthIndex est 0-indexé (0 = Janvier, 11 = Décembre), donc on ajoute 1 pour le calcul
   const quarter = Math.ceil((monthIndex + 1) / 3);
 
   return {
     mois: { start: monthStart, end: monthEnd },
     cumul: { start: yearStart, end: cumulEnd },
-    moisN1: { start: monthStartN1, end: monthEndN1 },
+    moisN1: { start: monthStartM1, end: monthEndM1 }, // Alimenté avec le mois précédent !
     cumulN1: { start: yearStartN1, end: cumulEndN1 },
 
     moisReferenceList,
     cumulReferenceList,
-    moisReferenceN1,
+    moisReferenceN1: moisReferenceM1, // Alimenté avec le mois précédent !
     cumulReferenceN1List,
 
     // Les clés exactes qui serviront à interroger le champ `periodeReference` de Prisma
@@ -110,7 +127,7 @@ export function computeFourWindows(targetMonth: string): FourWindows {
 export type KpiWindow = {
   mois: number;
   cumul: number;
-  moisN1: number;
+  moisN1: number; // Correspond désormais au mois précédent
   cumulN1: number;
   /** Évolution en % (1 décimale), `null` si moisN1 vaut 0 (division impossible). */
   evolMois: number | null;

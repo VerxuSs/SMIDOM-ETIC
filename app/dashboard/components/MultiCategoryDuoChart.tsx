@@ -68,7 +68,7 @@ export function MultiCategoryDuoChart({ title, unit, items }: MultiCategoryDuoCh
         </div>
 
         <div>
-          <p className="text-[10px] text-[#8AA0AA] uppercase font-bold mb-1 tracking-wide">Évolution N-1</p>
+          <p className="text-[10px] text-[#8AA0AA] uppercase font-bold mb-1 tracking-wide">Évolution Mois-1</p>
           <ResponsiveContainer width="100%" height={220}>
             <BarChart data={evolutionData} margin={{ top: 4, right: 4, left: -18, bottom: 0 }}>
               <CartesianGrid vertical={false} stroke={COLORS.grid} />

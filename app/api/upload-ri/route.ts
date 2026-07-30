@@ -283,11 +283,17 @@ function computeEvenements(workbook: XLSX.WorkBook, periodeReference: string): W
   const targetQuarter = parseInt(quarterStr.replace("T", ""), 10);
 
   for (const row of rows) {
-    const dateDebut = parseExcelDate(row["Date de début"] || row["DATE DEBUT"]);
-    if (!dateDebut) continue;
+    const eventYear = parseInt(<string>row["Année"]);
+    if (!eventYear) {
+      continue;
+    }
 
-    const eventYear = dateDebut.getFullYear();
-    const eventQuarter = Math.ceil((dateDebut.getMonth() + 1) / 3);
+    const evenMonth = parseInt(<string>row["Mois"]);
+    if (!evenMonth) {
+      continue;
+    }
+
+    const eventQuarter = Math.ceil((evenMonth) / 3);
 
     // Si on veut être strict sur l'appartenance au trimestre :
     if (eventYear === targetYear && eventQuarter === targetQuarter) {

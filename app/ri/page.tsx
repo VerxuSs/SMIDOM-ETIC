@@ -219,7 +219,7 @@ export default function RiUploadPage() {
           </div>
 
           <div className="bg-white rounded-2xl border border-[#E1E8E6] shadow-[0_8px_24px_-8px_rgba(15,42,61,0.08)] p-8">
-            <h1 className="text-[#0F2A3D] text-2xl font-extrabold mb-1">Importer un fichier Styx</h1>
+            <h1 className="text-[#0F2A3D] text-2xl font-extrabold mb-1">Importer un fichier</h1>
             <p className="text-[#52677A] text-sm mb-7">
               Chaque fichier est agrégé à la volée. Seuls les compteurs (KPIs) sont mis à jour (Upsert).
             </p>

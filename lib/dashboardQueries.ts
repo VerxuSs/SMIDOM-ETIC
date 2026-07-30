@@ -38,30 +38,29 @@ async function kpiCollecteParFonction(fonction: string, windows: FourWindows): P
 
 // Calcule le total Sytraival (Somme de BOM, PAV et Entretien PAV)
 async function kpiTotalOmrSytraival(windows: FourWindows): Promise<KpiWindow> {
-  const immats = await getImmatriculationsByFonction(["Collecte BOM", "Collecte PAV", "Collecte entretien PAV"]);
   const sumFn = async (range: DateRange): Promise<number> => {
-    if (immats.length === 0) return 0;
     const result = await prisma.pesee.aggregate({
       _sum: { poidsNet: true },
-      where: { immatriculation: { in: immats }, date: { gte: range.start, lt: range.end } },
+      where: { date: { gte: range.start, lt: range.end } },
     });
     return result._sum.poidsNet ?? 0;
   };
+
   return sumFourWindows(windows, sumFn);
 }
-
 // Transfert Serfim (identifié par l'immatriculation factice "SERFIM" lors de l'import)
 async function kpiTransfertSerfim(windows: FourWindows): Promise<KpiWindow> {
-  const sumFn = async (range: DateRange): Promise<number> => {
-    const result = await prisma.pesee.aggregate({
-      _sum: { poidsNet: true },
-      where: { immatriculation: "SERFIM", date: { gte: range.start, lt: range.end } },
-    });
-    return result._sum.poidsNet ?? 0;
-  };
-  return sumFourWindows(windows, sumFn);
-}
+  // On utilise la fonction helper `sumOmrValeurs` déjà présente dans ton fichier
+  const [mois, cumul, moisN1, cumulN1] = await Promise.all([
+    sumOmrValeurs("TRANSFERT_SERFIM", windows.moisReferenceList),
+    sumOmrValeurs("TRANSFERT_SERFIM", windows.cumulReferenceList),
+    sumOmrValeurs("TRANSFERT_SERFIM", [windows.moisReferenceN1]),
+    sumOmrValeurs("TRANSFERT_SERFIM", windows.cumulReferenceN1List),
+  ]);
 
+  // On assemble le tout au format attendu par le front-end
+  return buildKpiWindow(mois, cumul, moisN1, cumulN1);
+}
 // --- Helpers pour la nouvelle table OmrIndicateur ---
 async function sumOmrValeurs(indicateur: string, periodes: string[]): Promise<number> {
   if (periodes.length === 0) return 0;
@@ -129,90 +128,129 @@ export async function getOmrTab(windows: FourWindows) {
  * ======================================================================= */
 
 async function kpiPassagesParSite(windows: FourWindows) {
-  const results: { site: string; kpi: KpiWindow }[] = [];
-
-  // On déstructure l'objet pour récupérer uniquement la propriété "canon"
-  for (const { canon } of TERRITOIRE_SITES) {
+  // Optimisation : Promise.all pour exécuter les requêtes en parallèle
+  const promises = TERRITOIRE_SITES.map(({ canon }) => {
     const sumFn = (range: DateRange) =>
         prisma.dechetteriePassage.count({
           where: { site: canon, datePassage: { gte: range.start, lt: range.end } },
         });
-
-    results.push({ site: canon, kpi: await sumFourWindows(windows, sumFn) });
-  }
-
-  return results;
+    return sumFourWindows(windows, sumFn).then(kpi => ({ site: canon, kpi }));
+  });
+  return Promise.all(promises);
 }
 
-async function kpiFluxPayantsParMatiere(windows: FourWindows) {
+// Helper 1 : Calcule le Total par site pour un ou plusieurs prestataires
+async function kpiProviderTotalBySite(prestataires: string | string[], windows: FourWindows) {
+  const prestatairesArray = Array.isArray(prestataires) ? prestataires : [prestataires];
+
+  const promises = TERRITOIRE_SITES.map(({ canon }) => {
+    const sumFn = async (range: DateRange): Promise<number> => {
+      const result = await prisma.dechetterieFlux.aggregate({
+        _sum: { poidsTonnes: true },
+        where: {
+          prestataire: { in: prestatairesArray },
+          site: canon,
+          dateCollecte: { gte: range.start, lt: range.end }
+        },
+      });
+      return result._sum.poidsTonnes ?? 0;
+    };
+    return sumFourWindows(windows, sumFn).then(kpi => ({ site: canon, kpi }));
+  });
+  return Promise.all(promises);
+}
+
+// Helper 2 : Extrait les matières d'un prestataire et calcule le Total + le détail
+async function kpiProviderBySiteAndMatiere(prestataire: string, windows: FourWindows) {
   const matieresRows = await prisma.dechetterieFlux.findMany({
-    where: { categorieFlux: "PAYANT" },
+    where: { prestataire },
     select: { matiere: true },
     distinct: ["matiere"],
     orderBy: { matiere: "asc" },
   });
+  const matieres = matieresRows.map((r) => r.matiere).filter(Boolean);
 
-  const results: { matiere: string; kpi: KpiWindow }[] = [];
+  const totalParSite = await kpiProviderTotalBySite(prestataire, windows);
 
-  for (const { matiere } of matieresRows) {
-    const sumFn = async (range: DateRange): Promise<number> => {
-      const result = await prisma.dechetterieFlux.aggregate({
-        _sum: { poidsTonnes: true },
-        where: { categorieFlux: "PAYANT", matiere, dateCollecte: { gte: range.start, lt: range.end } },
-      });
-      return result._sum.poidsTonnes ?? 0;
-    };
-    results.push({ matiere, kpi: await sumFourWindows(windows, sumFn) });
+  // Optimisation majeure : on lance toutes les requêtes croisées en parallèle
+  const promises = [];
+  for (const { canon } of TERRITOIRE_SITES) {
+    for (const matiere of matieres) {
+      const sumFn = async (range: DateRange): Promise<number> => {
+        const result = await prisma.dechetterieFlux.aggregate({
+          _sum: { poidsTonnes: true },
+          where: {
+            prestataire,
+            site: canon,
+            matiere,
+            dateCollecte: { gte: range.start, lt: range.end }
+          },
+        });
+        return result._sum.poidsTonnes ?? 0;
+      };
+      promises.push(sumFourWindows(windows, sumFn).then(kpi => ({ site: canon, matiere, kpi })));
+    }
   }
+  const parSiteEtMatiere = await Promise.all(promises);
 
-  return results;
+  return { matieres, totalParSite, parSiteEtMatiere };
 }
 
-async function kpiEgtTotal(windows: FourWindows): Promise<KpiWindow> {
-  const sumFn = async (range: DateRange): Promise<number> => {
-    const result = await prisma.dechetterieFlux.aggregate({
-      _sum: { poidsTonnes: true },
-      where: { prestataire: "EGT", dateCollecte: { gte: range.start, lt: range.end } },
-    });
-    return result._sum.poidsTonnes ?? 0;
-  };
-  return sumFourWindows(windows, sumFn);
+// Helper pour calculer le trimestre précédent (ex: "2026-T1" -> "2025-T4")
+function getPreviousQuarter(quarterStr: string): string {
+  const parts = quarterStr.split("-T");
+  if (parts.length !== 2) return quarterStr;
+  let y = parseInt(parts[0], 10);
+  let q = parseInt(parts[1], 10);
+
+  q -= 1;
+  if (q === 0) {
+    q = 4;
+    y -= 1;
+  }
+  return `${y}-T${q}`;
 }
 
 export async function getDecheteriesTab(windows: FourWindows) {
-  // 1. Définir une fonction pour récupérer le total selon la période
-  // On utilise une fonction générique pour ne pas dupliquer la logique
-  const sumEcoSol = async (periode: string): Promise<number> => {
-    const res = await prisma.dechetterieFlux.aggregate({
-      where: { prestataire: "Eco'Sol", periodeReference: periode },
-      _sum: { poidsTonnes: true }
+  const currentYearStr = windows.periodeTrimestre.split("-")[0];
+  const lastYearStr = windows.periodeTrimestreN1.split("-")[0];
+
+  const quartersCurrentYear = [`${currentYearStr}-T1`, `${currentYearStr}-T2`, `${currentYearStr}-T3`, `${currentYearStr}-T4`];
+  const quartersLastYear = [`${lastYearStr}-T1`, `${lastYearStr}-T2`, `${lastYearStr}-T3`, `${lastYearStr}-T4`];
+
+  // Calcul du trimestre précédent (Q-1)
+  const prevQuarterStr = getPreviousQuarter(windows.periodeTrimestre);
+
+  const sumFnEcoSol = async (periodes: string[]): Promise<number> => {
+    const result = await prisma.dechetterieFlux.aggregate({
+      _sum: { poidsTonnes: true },
+      where: { prestataire: "Eco'Sol", periodeReference: { in: periodes } },
     });
-    return res._sum.poidsTonnes ?? 0;
+    return result._sum.poidsTonnes ?? 0;
   };
 
-  // 2. Récupérer les valeurs pour les 4 fenêtres (Mois, Cumul, N-1, Cumul N-1)
-  // Note : pour Eco'Sol qui est TRIMESTRIEL, on utilise la logique trimestrielle
-  const [mois, cumul, moisN1, cumulN1] = await Promise.all([
-    sumEcoSol(windows.periodeTrimestre),      // Trimestre actuel
-    sumEcoSol(windows.periodeAnnee),          // Année actuelle (Cumul)
-    sumEcoSol(windows.periodeTrimestreN1),    // Trimestre N-1
-    sumEcoSol(windows.periodeAnneeN1),        // Année N-1 (Cumul)
-  ]);
-
-  const ecoSolKpi = buildKpiWindow(mois, cumul, moisN1, cumulN1);
-
-  // 3. Appel des autres fonctions existantes
-  const [passagesParSite, fluxPayantsParMatiere, egtTotal] = await Promise.all([
+  const [
+    passagesParSite,
+    ecoSolMois, ecoSolCumul, ecoSolMoisN1, ecoSolCumulN1,
+    egt, chimirec, ecodds, chimirecEcoddsTotal
+  ] = await Promise.all([
     kpiPassagesParSite(windows),
-    kpiFluxPayantsParMatiere(windows),
-    kpiEgtTotal(windows),
+
+    sumFnEcoSol([windows.periodeTrimestre]),
+    sumFnEcoSol(quartersCurrentYear),
+    sumFnEcoSol([prevQuarterStr]),
+    sumFnEcoSol(quartersLastYear),
+
+    kpiProviderBySiteAndMatiere("EGT", windows),
+    kpiProviderBySiteAndMatiere("Chimirec", windows),
+    kpiProviderBySiteAndMatiere("EcoDDS", windows),
+    kpiProviderTotalBySite(["Chimirec", "EcoDDS"], windows)
   ]);
+
+  const ecoSolKpi = buildKpiWindow(ecoSolMois, ecoSolCumul, ecoSolMoisN1, ecoSolCumulN1);
 
   return {
-    passagesParSite,
-    ecoSol: ecoSolKpi,
-    fluxPayantsParMatiere,
-    egtTotal
+    passagesParSite, ecoSol: ecoSolKpi, egt, chimirec, ecodds, chimirecEcoddsTotal
   };
 }
 
@@ -266,15 +304,26 @@ async function riSnapshotWindow(indicateur: string, windows: FourWindows): Promi
   return buildKpiWindow(valeur, valeur, valeur, valeur);
 }
 
-// 3. Pour les Anomalies (Trimestrielles) : utilisation de windows.periodeTrimestre
+// 3. Pour les Anomalies et Convention (Trimestrielles)
 async function riTrimestrielWindow(indicateur: string, windows: FourWindows): Promise<KpiWindow> {
-  const [valeur, n1] = await Promise.all([
-    getRiValeur(indicateur, windows.periodeTrimestre),
-    getRiValeur(indicateur, windows.periodeTrimestreN1)
-  ]);
-  return buildKpiWindow(valeur, valeur, n1, n1);
-}
+  const currentYearStr = windows.periodeTrimestre.split("-")[0];
+  const lastYearStr = windows.periodeTrimestreN1.split("-")[0];
 
+  const quartersCurrentYear = [`${currentYearStr}-T1`, `${currentYearStr}-T2`, `${currentYearStr}-T3`, `${currentYearStr}-T4`];
+  const quartersLastYear = [`${lastYearStr}-T1`, `${lastYearStr}-T2`, `${lastYearStr}-T3`, `${lastYearStr}-T4`];
+
+  // Calcul du trimestre précédent (Q-1)
+  const prevQuarterStr = getPreviousQuarter(windows.periodeTrimestre);
+
+  const [valeurTrimestre, valeurCumul, n1Trimestre, n1Cumul] = await Promise.all([
+    getRiValeur(indicateur, windows.periodeTrimestre),
+    sumRiValeurs(indicateur, quartersCurrentYear),
+    getRiValeur(indicateur, prevQuarterStr),
+    sumRiValeurs(indicateur, quartersLastYear)
+  ]);
+
+  return buildKpiWindow(valeurTrimestre, valeurCumul, n1Trimestre, n1Cumul);
+}
 async function computeRiIndicator(indicateur: string, kind: RiIndicatorKind, windows: FourWindows): Promise<KpiWindow> {
   return kind === "FLOW" ? riFlowWindow(indicateur, windows) : riSnapshotWindow(indicateur, windows);
 }
@@ -351,38 +400,60 @@ async function csFlowWindow(indicateur: string, windows: FourWindows): Promise<K
 }
 
 async function kpiVerre(windows: FourWindows): Promise<KpiWindow> {
-  // NB SQLite : `contains` compile en `LIKE '%...%'`, et SQLite est
-  // insensible à la casse sur LIKE pour les caractères ASCII par défaut
-  // (pas besoin de `mode: "insensitive"`, non supporté par ce provider).
+  // 1. On récupère les plaques d'immatriculation des véhicules affectés au verre
+  // ⚠️ ATTENTION : Vérifie le texte exact dans ta base de données pour la fonction
+  // (ex: "VERRE", "Collecte Verre", "PAV Verre", etc.) et modifie la chaîne ci-dessous si besoin.
+  const immats = await getImmatriculationsByFonction("VERRE");
+
   const sumFn = async (range: DateRange): Promise<number> => {
+    // Si on ne trouve aucun camion avec cette fonction, on renvoie 0 direct
+    if (immats.length === 0) return 0;
+
+    // 2. On fait la somme des pesées uniquement pour ces camions
     const result = await prisma.pesee.aggregate({
       _sum: { poidsNet: true },
-      where: { produit: { contains: "VERRE" }, date: { gte: range.start, lt: range.end } },
+      where: {
+        immatriculation: { in: immats },
+        date: { gte: range.start, lt: range.end }
+      },
     });
     return result._sum.poidsNet ?? 0;
   };
+
   return sumFourWindows(windows, sumFn);
 }
 
 async function kpiEfficienceFlotte(vehiculeLabel: string, consoKey: string, kmKey: string, windows: FourWindows) {
-  const [conso, km, consoN1, kmN1] = await Promise.all([
-    getCsValeur(consoKey, windows.moisReferenceList[0]),
-    getCsValeur(kmKey, windows.moisReferenceList[0]),
-    getCsValeur(consoKey, windows.moisReferenceN1),
-    getCsValeur(kmKey, windows.moisReferenceN1),
+  // 1. Récupération du mois actuel depuis la fenêtre globale
+  const currentMonthStr = windows.moisReferenceList[0]; // ex: "2026-05"
+
+  // 2. Calcul du mois précédent (M-1)
+  const [year, month] = currentMonthStr.split("-").map(Number);
+  let prevYear = year;
+  let prevMonth = month - 1;
+  if (prevMonth === 0) {
+    prevMonth = 12;
+    prevYear -= 1;
+  }
+  const prevMonthStr = `${prevYear}-${String(prevMonth).padStart(2, "0")}`; // ex: "2026-04"
+
+  // 3. Appel à la BDD avec le mois actuel et le mois M-1
+  const [conso, km, consoM1, kmM1] = await Promise.all([
+    getCsValeur(consoKey, currentMonthStr),
+    getCsValeur(kmKey, currentMonthStr),
+    getCsValeur(consoKey, prevMonthStr), // <-- Mois précédent
+    getCsValeur(kmKey, prevMonthStr),    // <-- Mois précédent
   ]);
 
   const conso100 = km > 0 ? Math.round((conso / km) * 100 * 100) / 100 : null;
-  const conso100N1 = kmN1 > 0 ? Math.round((consoN1 / kmN1) * 100 * 100) / 100 : null;
-  const evolutionPct = conso100 !== null && conso100N1 !== null ? computeEvolutionPct(conso100, conso100N1) : null;
+  const conso100M1 = kmM1 > 0 ? Math.round((consoM1 / kmM1) * 100 * 100) / 100 : null;
+  const evolutionPct = conso100 !== null && conso100M1 !== null ? computeEvolutionPct(conso100, conso100M1) : null;
 
   return {
     vehicule: vehiculeLabel,
     conso100KmMois: conso100,
-    conso100KmMoisN1: conso100N1,
+    conso100KmMoisN1: conso100M1,
     evolutionPct,
-    // Moins de litres/100km = amélioration ; on l'expose explicitement pour
-    // que le front n'ait pas à réinventer la sémantique du signe.
     ameliore: evolutionPct !== null ? evolutionPct < 0 : null,
   };
 }
