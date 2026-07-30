@@ -29,6 +29,7 @@ type OmrTab = {
     parcCartesPav: KpiWindow;
     transfertSerfim: KpiWindow;
     totalOmrSytraival: KpiWindow;
+    efficienceFlotteBOM: EfficienceFlotte;
 };
 
 type ProviderData = {
@@ -43,7 +44,13 @@ type DecheteriesTab = {
     egt: ProviderData;
     chimirec: ProviderData;
     ecodds: ProviderData;
+    d3e: ProviderData;
     chimirecEcoddsTotal: { site: string; kpi: KpiWindow }[];
+    pneus?: KpiWindow;
+    ecoMaison?: KpiWindow;
+    ecoLogic?: KpiWindow;
+    radiographies?: KpiWindow;
+    huileVegetale?: KpiWindow;
 };
 
 type RiTab = {
@@ -55,6 +62,8 @@ type RiTab = {
 
 type EfficienceFlotte = {
     vehicule: string;
+    kmMois: number | null;
+    litresMois: number | null;
     conso100KmMois: number | null;
     conso100KmMoisN1: number | null;
     evolutionPct: number | null;
@@ -348,6 +357,21 @@ function OmrPanel({ tab }: { tab: OmrTab, temporalite: Temporalite }) {
                     </div>
                 </div>
             </Section>
+
+            <Section title="Efficience flotte BOM" badge="L/100km">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {tab.efficienceFlotteBOM && (
+                        <StatCard
+                            label={tab.efficienceFlotteBOM.vehicule}
+                            value={tab.efficienceFlotteBOM.conso100KmMois ?? "n/a"}
+                            suffix={tab.efficienceFlotteBOM.conso100KmMois !== null ? "L/100km" : undefined}
+                            evolutionPct={tab.efficienceFlotteBOM.evolutionPct}
+                            accent={tab.efficienceFlotteBOM.ameliore ? "green" : tab.efficienceFlotteBOM.ameliore === false ? "amber" : "blue"}
+                            helperText={`${tab.efficienceFlotteBOM.kmMois?.toLocaleString("fr-FR") ?? 0} km parcourus • ${tab.efficienceFlotteBOM.litresMois?.toLocaleString("fr-FR") ?? 0} L consommés`}
+                        />
+                    )}
+                </div>
+            </Section>
         </div>
     );
 }
@@ -375,6 +399,8 @@ function DecheteriesPanel({ tab, temporalite }: { tab: DecheteriesTab, temporali
                     <GraphiquePrestataire title="Flux Chimirec" data={tab.chimirec} />
                     <GraphiquePrestataire title="Flux EcoDDS" data={tab.ecodds} />
 
+                    <GraphiquePrestataire title="Flux D3E" data={tab.d3e} />
+
                     <MultiCategoryDuoChart
                         title="Total Produits Chimiques (Chimirec + EcoDDS)"
                         unit="T"
@@ -391,9 +417,20 @@ function DecheteriesPanel({ tab, temporalite }: { tab: DecheteriesTab, temporali
                             unit="T"
                             kpi={tab.ecoSol}
                             accent="#2E9E6D"
-                            periodLabel={currentQuarter} // Affichera "T1", "T2"... au lieu de "Mois"
+                            periodLabel={currentQuarter}
                         />
                     )}
+                </div>
+            </Section>
+
+            {/* SECTION : Flux manuels */}
+            <Section title="Autres flux (Saisies manuelles)">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {tab.pneus && <DuoChart title="Pneus (Alpharecyclage)" unit="T" kpi={tab.pneus} accent="#1D6FA5" />}
+                    {tab.ecoMaison && <DuoChart title="Eco maison (Sytraival)" unit="T" kpi={tab.ecoMaison} accent="#2E9E6D" />}
+                    {tab.ecoLogic && <DuoChart title="Eco logic (Sytraival)" unit="T" kpi={tab.ecoLogic} accent="#D98E3F" />}
+                    {tab.radiographies && <DuoChart title="Radiographies (Rhône Alpes)" unit="T" kpi={tab.radiographies} accent="#1D6FA5" />}
+                    {tab.huileVegetale && <DuoChart title="Huile végétale (Quatra)" unit="T" kpi={tab.huileVegetale} accent="#2E9E6D" />}
                 </div>
             </Section>
         </div>
@@ -485,13 +522,7 @@ function CsPanel({ tab }: { tab: CsTab, temporalite: Temporalite }) {
                             suffix={f.conso100KmMois !== null ? "L/100km" : undefined}
                             evolutionPct={f.evolutionPct}
                             accent={f.ameliore ? "green" : f.ameliore === false ? "amber" : "blue"}
-                            helperText={
-                                f.ameliore === null
-                                    ? "Données insuffisantes pour comparer à N-1."
-                                    : f.ameliore
-                                        ? "En amélioration par rapport au mois dernier."
-                                        : "En dégradation par rapport au mois dernier."
-                            }
+                            helperText={`${f.kmMois?.toLocaleString("fr-FR") ?? 0} km parcourus • ${f.litresMois?.toLocaleString("fr-FR") ?? 0} L consommés`}
                         />
                     ))}
                 </div>

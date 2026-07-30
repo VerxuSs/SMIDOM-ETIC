@@ -45,23 +45,21 @@ async function kpiTotalOmrSytraival(windows: FourWindows): Promise<KpiWindow> {
     });
     return result._sum.poidsNet ?? 0;
   };
-
   return sumFourWindows(windows, sumFn);
 }
+
 // Transfert Serfim (identifié par l'immatriculation factice "SERFIM" lors de l'import)
 async function kpiTransfertSerfim(windows: FourWindows): Promise<KpiWindow> {
-  // On utilise la fonction helper `sumOmrValeurs` déjà présente dans ton fichier
   const [mois, cumul, moisN1, cumulN1] = await Promise.all([
     sumOmrValeurs("TRANSFERT_SERFIM", windows.moisReferenceList),
     sumOmrValeurs("TRANSFERT_SERFIM", windows.cumulReferenceList),
     sumOmrValeurs("TRANSFERT_SERFIM", [windows.moisReferenceN1]),
     sumOmrValeurs("TRANSFERT_SERFIM", windows.cumulReferenceN1List),
   ]);
-
-  // On assemble le tout au format attendu par le front-end
   return buildKpiWindow(mois, cumul, moisN1, cumulN1);
 }
-// --- Helpers pour la nouvelle table OmrIndicateur ---
+
+// --- Helpers pour la table OmrIndicateur ---
 async function sumOmrValeurs(indicateur: string, periodes: string[]): Promise<number> {
   if (periodes.length === 0) return 0;
   const rows = await prisma.omrIndicateur.findMany({
@@ -78,6 +76,61 @@ async function getOmrValeur(indicateur: string, periode: string): Promise<number
   return row?.valeur ?? 0;
 }
 
+async function kpiEfficienceFlotteOmr(windows: FourWindows) {
+  // 1. On cherche les camions BOM (Adapte le nom exact si besoin)
+  const immats = await getImmatriculationsByFonction(["Collecte BOM", "BOM"]);
+
+  // Fonction interne pour additionner KMS et LITRES sur un mois donné
+  const getStatsForMonth = async (monthStr: string) => {
+    if (immats.length === 0) return { km: 0, litres: 0 };
+    const [year, month] = monthStr.split("-").map(Number);
+    const startDate = new Date(year, month - 1, 1);
+    const endDate = new Date(year, month, 1); // 1er du mois suivant
+
+    // Prisma additionne toutes les lignes qui tombent dans ce mois
+    const result = await prisma.suiviVehicule.aggregate({
+      _sum: { distanceKm: true, litresCarburant: true },
+      where: {
+        immatriculation: { in: immats },
+        date: { gte: startDate, lt: endDate }
+      }
+    });
+    return {
+      km: result._sum.distanceKm ?? 0,
+      litres: result._sum.litresCarburant ?? 0
+    };
+  };
+
+  // Récupère la chaîne de caractères du mois en cours
+  const currentMonthStr = windows.moisReferenceList[0];
+
+  // Calcule la chaîne du mois précédent (M-1)
+  const [year, month] = currentMonthStr.split("-").map(Number);
+  let prevYear = year; let prevMonth = month - 1;
+  if (prevMonth === 0) { prevMonth = 12; prevYear -= 1; }
+  const prevMonthStr = `${prevYear}-${String(prevMonth).padStart(2, "0")}`;
+
+  // Récupère les totaux
+  const current = await getStatsForMonth(currentMonthStr);
+  console.log(current);
+  const prev = await getStatsForMonth(prevMonthStr);
+
+  // Calcule le ratio L/100km
+  const conso100 = current.km > 0 ? Math.round((current.litres / current.km) * 10000) / 100 : null;
+  const conso100M1 = prev.km > 0 ? Math.round((prev.litres / prev.km) * 10000) / 100 : null;
+  const evolutionPct = conso100 !== null && conso100M1 !== null ? computeEvolutionPct(conso100, conso100M1) : null;
+
+  return {
+    vehicule: "Flotte BOM",
+    kmMois: current.km,
+    litresMois: current.litres,
+    conso100KmMois: conso100,
+    conso100KmMoisN1: conso100M1,
+    evolutionPct,
+    ameliore: evolutionPct !== null ? evolutionPct < 0 : null,
+  };
+}
+
 export async function getOmrTab(windows: FourWindows) {
   const [
     collecteBOM,
@@ -85,29 +138,23 @@ export async function getOmrTab(windows: FourWindows) {
     collecteEntretienPAV,
     totalOmrSytraival,
     transfertSerfim,
-
-    // Bio-déchets (Flux mensuel)
     bioMois, bioCumul, bioMoisN1, bioCumulN1,
-
-    // Parcs (Instantanés globaux)
     parcBacs,
-    parcCartes
+    parcCartes,
+    efficienceFlotteBOM
   ] = await Promise.all([
     kpiCollecteParFonction("Collecte BOM", windows),
     kpiCollecteParFonction("Collecte PAV", windows),
     kpiCollecteParFonction("Collecte entretien PAV", windows),
     kpiTotalOmrSytraival(windows),
     kpiTransfertSerfim(windows),
-
-    // Récupération des Bio-déchets
     sumOmrValeurs("TOTAL_BIODECHETS", windows.moisReferenceList),
     sumOmrValeurs("TOTAL_BIODECHETS", windows.cumulReferenceList),
     sumOmrValeurs("TOTAL_BIODECHETS", [windows.moisReferenceN1]),
     sumOmrValeurs("TOTAL_BIODECHETS", windows.cumulReferenceN1List),
-
-    // Récupération des données globales
     getOmrValeur("PARC_BACS_PARTICULIERS", windows.periodeGlobale),
     getOmrValeur("PARC_CARTES_PAV", windows.periodeGlobale),
+    kpiEfficienceFlotteOmr(windows),
   ]);
 
   return {
@@ -116,10 +163,10 @@ export async function getOmrTab(windows: FourWindows) {
     collecteEntretienPAV,
     totalOmrSytraival,
     transfertSerfim,
-    // Formatage manuel des KPI via buildKpiWindow
     bioDechetsTotal: buildKpiWindow(bioMois, bioCumul, bioMoisN1, bioCumulN1),
     parcBacsParticuliers: buildKpiWindow(parcBacs, parcBacs, parcBacs, parcBacs),
     parcCartesPav: buildKpiWindow(parcCartes, parcCartes, parcCartes, parcCartes),
+    efficienceFlotteBOM
   };
 }
 
@@ -229,10 +276,33 @@ export async function getDecheteriesTab(windows: FourWindows) {
     return result._sum.poidsTonnes ?? 0;
   };
 
+  const sumFnMatiere = async (matiere: string, periodes: string[]): Promise<number> => {
+    const result = await prisma.dechetterieFlux.aggregate({
+      _sum: { poidsTonnes: true },
+      where: { matiere: matiere, periodeReference: { in: periodes } },
+    });
+    return result._sum.poidsTonnes ?? 0;
+  };
+
+  const getKpiMatiere = async (matiere: string) => {
+    const [mois, cumul, moisN1, cumulN1] = await Promise.all([
+      sumFnMatiere(matiere, windows.moisReferenceList),
+      sumFnMatiere(matiere, windows.cumulReferenceList),
+      sumFnMatiere(matiere, [windows.moisReferenceN1]),
+      sumFnMatiere(matiere, windows.cumulReferenceN1List),
+    ]);
+    return buildKpiWindow(mois, cumul, moisN1, cumulN1);
+  };
+
   const [
     passagesParSite,
     ecoSolMois, ecoSolCumul, ecoSolMoisN1, ecoSolCumulN1,
-    egt, chimirec, ecodds, chimirecEcoddsTotal
+    egt, chimirec, ecodds, chimirecEcoddsTotal,
+
+    d3e,
+
+    // NOUVEAUX FLUX MANUELS
+    pneus, ecoMaison, ecoLogic, radiographies, huileVegetale
   ] = await Promise.all([
     kpiPassagesParSite(windows),
 
@@ -244,13 +314,32 @@ export async function getDecheteriesTab(windows: FourWindows) {
     kpiProviderBySiteAndMatiere("EGT", windows),
     kpiProviderBySiteAndMatiere("Chimirec", windows),
     kpiProviderBySiteAndMatiere("EcoDDS", windows),
-    kpiProviderTotalBySite(["Chimirec", "EcoDDS"], windows)
+    kpiProviderTotalBySite(["Chimirec", "EcoDDS"], windows),
+
+    kpiProviderBySiteAndMatiere("D3E", windows),
+
+    getKpiMatiere("Pneus"),
+    getKpiMatiere("Eco maison"),
+    getKpiMatiere("Eco logic"),
+    getKpiMatiere("Radiographies"),
+    getKpiMatiere("Huile végétale"),
   ]);
 
   const ecoSolKpi = buildKpiWindow(ecoSolMois, ecoSolCumul, ecoSolMoisN1, ecoSolCumulN1);
 
   return {
-    passagesParSite, ecoSol: ecoSolKpi, egt, chimirec, ecodds, chimirecEcoddsTotal
+    passagesParSite,
+    ecoSol: ecoSolKpi,
+    egt,
+    chimirec,
+    ecodds,
+    chimirecEcoddsTotal,
+    d3e,
+    pneus,
+    ecoMaison,
+    ecoLogic,
+    radiographies,
+    huileVegetale
   };
 }
 
@@ -451,6 +540,8 @@ async function kpiEfficienceFlotte(vehiculeLabel: string, consoKey: string, kmKe
 
   return {
     vehicule: vehiculeLabel,
+    kmMois: km,
+    litresMois: conso,
     conso100KmMois: conso100,
     conso100KmMoisN1: conso100M1,
     evolutionPct,

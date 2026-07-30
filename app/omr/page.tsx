@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import {useEffect, useRef, useState} from "react";
 import {
   UploadCloud,
   FileSpreadsheet,
@@ -117,6 +117,9 @@ function currentMonthValue(): string {
 }
 
 export default function OmrUploadPage() {
+  // 1. AJOUT DE L'ÉTAT MOUNTED POUR CONTOURNER L'ERREUR D'HYDRATATION
+  const [mounted, setMounted] = useState(false);
+
   const [workflowId, setWorkflowId] = useState<WorkflowId>("referentiel");
   const [targetMonth, setTargetMonth] = useState<string>(currentMonthValue());
   const [fileName, setFileName] = useState<string | null>(null);
@@ -127,6 +130,11 @@ export default function OmrUploadPage() {
 
   const inputRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<File | null>(null);
+
+  // 2. PASSAGE DE MOUNTED À TRUE CÔTÉ CLIENT UNIQUEMENT
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   const activeWorkflow = WORKFLOWS.find((w) => w.id === workflowId)!;
 
@@ -176,6 +184,9 @@ export default function OmrUploadPage() {
     setErrorMessage(null);
     if (inputRef.current) inputRef.current.value = "";
   }
+
+  // 3. ON BLOQUE LE RENDU DU HTML TANT QU'ON N'EST PAS SUR LE NAVIGATEUR
+  if (!mounted) return null;
 
   const canSubmit = !!fileName && !!targetMonth && state !== "uploading";
 
